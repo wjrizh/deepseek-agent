@@ -44,7 +44,12 @@ pub async fn run(
 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AgentError::Other(format!("readline: {e}")))?;
-    let prompt_str = format!("{}❯{} ", ui::GREEN, ui::RESET);
+let prompt_str = format!("{}❯{} ", ui::GREEN, ui::RESET);
+println!(
+    "{}(输入 /free 自动批准命令 · /safe 恢复确认){}",
+    ui::DIM,
+    ui::RESET
+);
 
     loop {
         match rl.readline(&prompt_str) {
@@ -53,9 +58,19 @@ pub async fn run(
                 if q.is_empty() {
                     continue;
                 }
-                if matches!(q, "exit" | "quit" | "退出") {
-                    break;
-                }
+if matches!(q, "exit" | "quit" | "退出") {
+    break;
+}
+if q == "/free" {
+    agent.set_free_mode(true);
+    println!("{}[✓] /free 已开启：后续命令自动批准{}", ui::GREEN, ui::RESET);
+    continue;
+}
+if q == "/safe" {
+    agent.set_free_mode(false);
+    println!("{}[✓] 已切回安全模式：命令需确认{}", ui::GREEN, ui::RESET);
+    continue;
+}
                 let _ = rl.add_history_entry(q);
                 if let Err(e) = agent.run(q).await {
                     eprintln!("{}[!] 出错: {}{}", ui::RED, e, ui::RESET);

@@ -120,6 +120,29 @@ fn trust_menu_inner(out: &mut std::io::Stdout) -> Result<bool> {
     }
 }
 
+/// 打印工具执行结果（暗色）。
+pub fn print_tool_result(result: &str) {
+    println!("{DIM}──────── tool result ────────{RESET}");
+    for line in result.lines() {
+        println!("{DIM}{line}{RESET}");
+    }
+    println!("{DIM}─────────────────────────────{RESET}");
+}
+
+/// 命令执行确认。返回 true=允许。非 TTY 下安全默认拒绝（除非 /free）。
+pub fn confirm_command(cmd: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        println!("{DIM}[!] 命令未执行（非交互模式，未开启 /free）: {cmd}{RESET}");
+        return Ok(false);
+    }
+    print!("\n{RED}⚠ 即将执行命令:{RESET}\n  {CYAN}{cmd}{RESET}\n允许? [y/N] ");
+    let _ = stdout().flush();
+let mut line = String::new();
+std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
+    .map_err(|e| AgentError::Other(e.to_string()))?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
 // ---------- 流式渲染（ratatui Viewport::Inline） ----------
 
 use ratatui::backend::CrosstermBackend;
@@ -183,6 +206,93 @@ impl LineCollapser {
     }
 }
 
+/// 流式工具标签抑制器：吞掉两种格式的工具块。
+/// 跨 delta 边界安全；未闭合的块在 finish 时丢弃。
+struct TagFilter {
+    pairs: Vec<(String, String)>,
+    hold: String,
+    suppressing: bool,
+    close: String,
+}
+
+impl TagFilter {
+    fn new() -> Self {
+        let mut pairs = vec![
+            ("<tool_calls".to_string(), "</tool_calls>".to_string()),
+            ("<invoke".to_string(), "</invoke>".to_string()),
+        ];
+        for t in crate::agent::parser::KNOWN_TOOLS {
+            pairs.push((format!("<{t}"), format!("</{t}>")));
+        }
+        Self {
+            pairs,
+            hold: String::new(),
+            suppressing: false,
+            close: String::new(),
+        }
+    }
+
+    fn feed(&mut self, text: &str) -> String {
+        let mut data = std::mem::take(&mut self.hold);
+        data.push_str(text);
+        let lower = data.to_ascii_lowercase();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < data.len() {
+            if self.suppressing {
+                if let Some(rel) = lower[i..].find(&self.close) {
+                    i += rel + self.close.len();
+                    self.suppressing = false;
+                    continue;
+                }
+                self.hold = data[i..].to_string();
+                return out;
+            }
+            let Some(rel) = lower[i..].find('<') else {
+                out.push_str(&data[i..]);
+                return out;
+            };
+            let abs = i + rel;
+            out.push_str(&data[i..abs]);
+            let rest = &lower[abs..];
+            if let Some((open, close)) = self
+                .pairs
+                .iter()
+                .find(|(o, _)| rest.starts_with(o.as_str()))
+                .cloned()
+            {
+                self.suppressing = true;
+                self.close = close;
+                i = abs + open.len();
+                continue;
+            }
+            if self.pairs.iter().any(|(o, _)| o.starts_with(rest)) {
+                self.hold = data[abs..].to_string();
+                return out;
+            }
+            out.push('<');
+            i = abs + 1;
+        }
+        out
+    }
+
+    fn finish(&mut self) -> String {
+        let mut out = String::new();
+        if !self.suppressing {
+            out.push_str(&self.hold);
+        }
+        self.hold.clear();
+        self.suppressing = false;
+        out
+    }
+}
+
+impl Default for TagFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 活区渲染器：思考在 ratatui Viewport::Inline 活区（暗灰），
 /// 答案首字到达时**释放活区**，回归普通 print! 流式输出。
 pub struct LiveUi {
@@ -192,6 +302,8 @@ pub struct LiveUi {
     tick: usize,
     viewport_top: Option<u16>,
     collapse: LineCollapser,
+    filter: TagFilter,
+    prefix_printed: bool,
 }
 
 impl LiveUi {
@@ -211,6 +323,8 @@ impl LiveUi {
             tick: 0,
             viewport_top: None,
             collapse: LineCollapser::default(),
+            filter: TagFilter::new(),
+            prefix_printed: false,
         };
         let _ = ui.draw_thinking();
         Ok(ui)
@@ -230,8 +344,13 @@ impl LiveUi {
                     self.answer_started = true;
                     self.end_thinking();
                 }
-                let out = self.collapse.feed(text);
+                let filtered = self.filter.feed(text);
+                let out = self.collapse.feed(&filtered);
                 if !out.is_empty() {
+                    if !self.prefix_printed {
+                        self.prefix_printed = true;
+                        print!("\x1b[1;32mligong > \x1b[0m");
+                    }
                     print!("{out}");
                     let _ = std::io::stdout().flush();
                 }
@@ -278,17 +397,21 @@ impl LiveUi {
             let _ = std::io::stdout().flush();
             drop(t);
         }
-        print!("\x1b[1;32mligong > \x1b[0m");
-        let _ = std::io::stdout().flush();
     }
 
     pub fn finish(&mut self) {
         if self.answer_started {
-            let tail = self.collapse.finish();
+            let f = self.filter.finish();
+            let mut tail = self.collapse.feed(&f);
+            tail.push_str(&self.collapse.finish());
             if !tail.is_empty() {
+                if !self.prefix_printed {
+                    self.prefix_printed = true;
+                    print!("\x1b[1;32mligong > \x1b[0m");
+                }
                 print!("{tail}");
             }
-            if !tail.ends_with('\n') {
+            if self.prefix_printed {
                 println!();
             }
             let _ = std::io::stdout().flush();
@@ -302,6 +425,8 @@ impl LiveUi {
 pub struct PlainUi {
     answer_started: bool,
     collapse: LineCollapser,
+    filter: TagFilter,
+    prefix_printed: bool,
 }
 
 impl PlainUi {
@@ -309,22 +434,25 @@ impl PlainUi {
         Self {
             answer_started: false,
             collapse: LineCollapser::default(),
+            filter: TagFilter::new(),
+            prefix_printed: false,
         }
     }
 
     pub fn on_delta(&mut self, kind: DeltaKind, text: &str) {
         match kind {
-            DeltaKind::Thinking => {
-                let _ = kind;
-                let _ = text;
-            }
+            DeltaKind::Thinking => {}
             DeltaKind::Answer => {
                 if !self.answer_started {
                     self.answer_started = true;
-                    print!("ligong > ");
                 }
-                let out = self.collapse.feed(text);
+                let filtered = self.filter.feed(text);
+                let out = self.collapse.feed(&filtered);
                 if !out.is_empty() {
+                    if !self.prefix_printed {
+                        self.prefix_printed = true;
+                        print!("ligong > ");
+                    }
                     print!("{out}");
                     let _ = std::io::stdout().flush();
                 }
@@ -334,11 +462,17 @@ impl PlainUi {
 
     pub fn finish(&mut self) {
         if self.answer_started {
-            let tail = self.collapse.finish();
+            let f = self.filter.finish();
+            let mut tail = self.collapse.feed(&f);
+            tail.push_str(&self.collapse.finish());
             if !tail.is_empty() {
+                if !self.prefix_printed {
+                    self.prefix_printed = true;
+                    print!("ligong > ");
+                }
                 print!("{tail}");
             }
-            if !tail.ends_with('\n') {
+            if self.prefix_printed {
                 println!();
             }
             let _ = std::io::stdout().flush();
