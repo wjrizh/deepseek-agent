@@ -129,6 +129,11 @@ pub fn print_tool_result(result: &str) {
     println!("{DIM}─────────────────────────────{RESET}");
 }
 
+/// 流式命令执行完毕后的紧凑分隔（输出已实时流过）。
+pub fn print_tool_done() {
+    println!("\n{DIM}── 命令执行完毕 ──{RESET}");
+}
+
 /// 命令执行确认。返回 true=允许。非 TTY 下安全默认拒绝（除非 /free）。
 pub fn confirm_command(cmd: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() {
@@ -206,84 +211,77 @@ impl LineCollapser {
     }
 }
 
-/// 流式工具标签抑制器：吞掉两种格式的工具块。
-/// 跨 delta 边界安全；未闭合的块在 finish 时丢弃。
+/// 流式工具标签抑制器：从第一个工具开标签起，抑制到流结束。
+/// 不依赖闭合标签（模型常漏闭合），跨 chunk 安全，保留前置文本。
 struct TagFilter {
-    pairs: Vec<(String, String)>,
+    opens: Vec<String>,
     hold: String,
     suppressing: bool,
-    close: String,
 }
 
 impl TagFilter {
     fn new() -> Self {
-        let mut pairs = vec![
-            ("<tool_calls".to_string(), "</tool_calls>".to_string()),
-            ("<invoke".to_string(), "</invoke>".to_string()),
-        ];
+        let mut opens = vec!["<tool_calls".to_string(), "<invoke".to_string()];
         for t in crate::agent::parser::KNOWN_TOOLS {
-            pairs.push((format!("<{t}"), format!("</{t}>")));
+            opens.push(format!("<{t}"));
         }
         Self {
-            pairs,
+            opens,
             hold: String::new(),
             suppressing: false,
-            close: String::new(),
         }
     }
 
     fn feed(&mut self, text: &str) -> String {
+        if self.suppressing {
+            return String::new();
+        }
         let mut data = std::mem::take(&mut self.hold);
         data.push_str(text);
         let lower = data.to_ascii_lowercase();
-        let mut out = String::new();
-        let mut i = 0usize;
-        while i < data.len() {
-            if self.suppressing {
-                if let Some(rel) = lower[i..].find(&self.close) {
-                    i += rel + self.close.len();
-                    self.suppressing = false;
-                    continue;
-                }
-                self.hold = data[i..].to_string();
-                return out;
+
+        let mut earliest: Option<usize> = None;
+        let mut search = 0;
+        while let Some(rel) = lower[search..].find('<') {
+            let abs = search + rel;
+            let tail = &lower[abs..];
+            let end = tail.find('>').map(|p| p + 1).unwrap_or(tail.len());
+            let norm = crate::agent::parser::normalize_tag_prefix(&tail[..end]);
+            let norm = norm.to_ascii_lowercase();
+            if self.opens.iter().any(|o| norm.starts_with(o.as_str())) {
+                earliest = Some(abs);
+                break;
             }
-            let Some(rel) = lower[i..].find('<') else {
-                out.push_str(&data[i..]);
-                return out;
-            };
-            let abs = i + rel;
-            out.push_str(&data[i..abs]);
-            let rest = &lower[abs..];
-            if let Some((open, close)) = self
-                .pairs
-                .iter()
-                .find(|(o, _)| rest.starts_with(o.as_str()))
-                .cloned()
-            {
-                self.suppressing = true;
-                self.close = close;
-                i = abs + open.len();
-                continue;
-            }
-            if self.pairs.iter().any(|(o, _)| o.starts_with(rest)) {
-                self.hold = data[abs..].to_string();
-                return out;
-            }
-            out.push('<');
-            i = abs + 1;
+            search = abs + 1;
         }
-        out
+
+        if let Some(pos) = earliest {
+            let out = data[..pos].to_string();
+            self.suppressing = true;
+            self.hold.clear();
+            return out;
+        }
+
+        if let Some(lt) = data.rfind('<') {
+            let tail = &lower[lt..];
+            let end = tail.find('>').map(|p| p + 1).unwrap_or(tail.len());
+            let norm = crate::agent::parser::normalize_tag_prefix(&tail[..end]);
+            let norm = norm.to_ascii_lowercase();
+            if self.opens.iter().any(|o| o.starts_with(norm.as_str())) {
+                let out = data[..lt].to_string();
+                self.hold = data[lt..].to_string();
+                return out;
+            }
+        }
+        data
     }
 
     fn finish(&mut self) -> String {
-        let mut out = String::new();
-        if !self.suppressing {
-            out.push_str(&self.hold);
+        if self.suppressing {
+            self.hold.clear();
+            return String::new();
         }
-        self.hold.clear();
-        self.suppressing = false;
-        out
+        std::mem::take(&mut self.hold)
     }
 }
 

@@ -38,6 +38,8 @@ To run a command, reply with EXACTLY this structure and nothing else:
 
 Rules:
 - Nothing before or after the block. No markdown fences, no explanations.
+- Use the tag names EXACTLY as shown. No prefixes, suffixes, or extra
+  characters in any tag name. Never emit <|...|> or <｜...｜> style markers.
 - Call at most ONE tool per reply. Never mix a tool call with normal text.
 - After a tool call, STOP and wait for the <tool_result>. Never invent results.
 - When the task is done, reply in plain text with NO tags at all.

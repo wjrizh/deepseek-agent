@@ -136,9 +136,8 @@ impl Agent {
             ui.finish();
             self.parent_message_id = reply.message_id;
 
-            // 5. 解析输出
-            // eprintln!("\n===== RAW REPLY =====\n{}\n=====================\n", reply.content);
-            match parser::parse(&reply.content) {
+// 5. 解析输出
+match parser::parse(&reply.content) {
                 ParseOutcome::Text(_) => {
                     self.memory.push(Message {
                         role: Role::Assistant,
@@ -149,8 +148,13 @@ impl Agent {
                 ParseOutcome::Call(call) => {
                     malformed_retries = 0;
                     tool_rounds += 1;
-                    let result = self.run_tool(&call).await;
-                    crate::ui::print_tool_result(&result);
+                    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+                    let result = self.run_tool(&call, tty).await;
+                    if tty {
+                        crate::ui::print_tool_done();
+                    } else {
+                        crate::ui::print_tool_result(&result);
+                    }
                     next_prompt = format!("<tool_result>\n{result}\n</tool_result>");
 
                     if tool_rounds >= MAX_TOOL_ROUNDS {
@@ -185,8 +189,8 @@ impl Agent {
         }
     }
 
-    /// 执行工具调用，返回结果文本（含审批）。
-    async fn run_tool(&self, call: &parser::ToolCall) -> String {
+    /// 执行工具调用（流式输出），返回结果文本（含审批）。
+    async fn run_tool(&self, call: &parser::ToolCall, live: bool) -> String {
         let cmd = call.params.get("command").map(|s| s.as_str()).unwrap_or("");
 
         // 审批：非 /free 模式需用户确认
@@ -199,10 +203,18 @@ impl Agent {
         }
 
         match self.tools.get(&call.name) {
-            Some(tool) => match tool.call(&call.params).await {
-                Ok(out) => out,
-                Err(e) => format!("[工具错误] {e}"),
-            },
+            Some(tool) => {
+                let mut sink = |chunk: &str| {
+                    if live {
+                        print!("{chunk}");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+                };
+                match tool.call(&call.params, live, &mut sink).await {
+                    Ok(out) => out,
+                    Err(e) => format!("[工具错误] {e}"),
+                }
+            }
             None => format!("[未知工具] {}", call.name),
         }
     }

@@ -1,1 +1,9 @@
 /target
+
+# 本地 AI 记忆与逆向笔记（个人环境相关）
+MEMORY.md
+DeepSeek上传API逆向记录.md
+docs/
+
+# 测试下载产物
+*.bin
