@@ -133,6 +133,18 @@ impl Completer for AgentCompleter {
             && matches!(cmd, "/switch" | "/delete")
         {
             let pfx = word.trim();
+            // /switch 已输入 id 后，补 "tree"
+            if cmd == "/switch" {
+                let before = head[..start].trim_end();
+                let tokens: Vec<&str> = before.split_whitespace().collect();
+                if tokens.len() == 2 && "tree".starts_with(pfx) {
+                    out.push(Pair {
+                        display: "tree".to_string(),
+                        replacement: "tree".to_string(),
+                    });
+                    return Ok((start, out));
+                }
+            }
             for (id, title) in &self.sessions {
                 if id.starts_with(pfx) {
                     let short = &id[..id.len().min(8)];
@@ -352,11 +364,15 @@ pub async fn run(
                 }
                 if let Some(arg) = q.strip_prefix("/switch ") {
                     let arg = arg.trim();
+                    // 解析「<id前缀> [tree]」
+                    let mut parts = arg.split_whitespace();
+                    let id_arg = parts.next().unwrap_or("").to_string();
+                    let want_tree = parts.next() == Some("tree");
                     match chat::list_sessions(&rt.http).await {
                         Ok(list) => {
                             let hits: Vec<_> = list
                                 .iter()
-                                .filter(|s| s.id.starts_with(arg))
+                                .filter(|s| s.id.starts_with(&id_arg))
                                 .collect();
                             let target = match hits.as_slice() {
                                 [] => {
@@ -377,6 +393,65 @@ pub async fn run(
                                     continue;
                                 }
                             };
+
+                            // /switch <id> tree —— 列出分支供选择
+                            if want_tree {
+                                match chat::session_branches(&rt.http, &target.id).await {
+                                    Ok(branches) if !branches.is_empty() => {
+                                        println!(
+                                            "{}会话 {} · {} 个分支{}",
+                                            ui::DIM,
+                                            &target.id[..target.id.len().min(8)],
+                                            branches.len(),
+                                            ui::RESET
+                                        );
+                                        let mut options: Vec<String> = Vec::new();
+                                        for (i, b) in branches.iter().enumerate() {
+                                            let mark = if b.is_current { "●" } else { " " };
+                                            let label = format!(
+                                                "[{}] {} {} · {}（{} 条）",
+                                                i + 1,
+                                                mark,
+                                                b.leaf_mid,
+                                                if b.summary.is_empty() { "(空)".into() } else { b.summary.clone() },
+                                                b.size
+                                            );
+                                            options.push(label);
+                                        }
+                                        let opts_ref: Vec<&str> =
+                                            options.iter().map(|s| s.as_str()).collect();
+                                        match crate::ui::select_menu("选择要续接的分支：", &opts_ref) {
+                                            Ok(idx) => {
+                                                let chosen = &branches[idx];
+                                                let parent = Some(chosen.leaf_mid);
+                                                match agent.switch_session(target.id.clone(), parent) {
+                                                    Ok(()) => println!(
+                                                        "{}[✓] 已切到分支 mid={} · {}{}",
+                                                        ui::GREEN,
+                                                        chosen.leaf_mid,
+                                                        chosen.summary,
+                                                        ui::RESET
+                                                    ),
+                                                    Err(e) => eprintln!(
+                                                        "{}[!] 切换失败: {e}{}",
+                                                        ui::RED,
+                                                        ui::RESET
+                                                    ),
+                                                }
+                                            }
+                                            Err(_) => println!("{}已取消{}", ui::DIM, ui::RESET),
+                                        }
+                                    }
+                                    Ok(_) => println!("{}(该会话无分支){}", ui::DIM, ui::RESET),
+                                    Err(e) => eprintln!(
+                                        "{}[!] 拉取分支失败: {e}{}",
+                                        ui::RED,
+                                        ui::RESET
+                                    ),
+                                }
+                                continue;
+                            }
+
                             let local_parent = agent.store_parent_of(&target.id);
                             let (online_latest, recent) =
                                 match chat::history_tail(&rt.http, &target.id, 3).await {
@@ -391,6 +466,13 @@ pub async fn run(
                                     }
                                 };
                             let parent = local_parent.or(online_latest);
+                            if parent.is_none() {
+                                eprintln!(
+                                    "{}[!] 该会话无可续接的 parent，将从新开始（历史仍在服务端）{}",
+                                    ui::RED,
+                                    ui::RESET
+                                );
+                            }
                             match agent.switch_session(target.id.clone(), parent) {
                                 Ok(()) => {
                                     println!(

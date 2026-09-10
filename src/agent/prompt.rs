@@ -44,4 +44,11 @@ Rules:
 - After a tool call, STOP and wait for the <tool_result>. Never invent results.
 - When the task is done, reply in plain text with NO tags at all.
 - Prefer read-only commands (ls, cat, grep, find) before mutating ones.
-- The command runs in the project working directory via bash."#;
+- The command runs in the project working directory via bash.
+- NEVER write the literal tags `<tool_calls>`, `<invoke`, `<parameter`, or
+  `</parameter>` inside a `command` value or in normal reply text. To discuss
+  the tool format, describe it in words instead of quoting the tags.
+- NEVER use heredocs (`<<'EOF'`, `<<PY`, etc.) — they are unreliable in this PTY
+  environment and can hang the interpreter in a REPL. To run multi-line code,
+  first write the file with a heredoc-free method, then execute the file
+  (e.g. `python3 script.py`). For one-liners use `-c '...'`."#;

@@ -11,7 +11,7 @@ use crate::error::{AgentError, Result};
 use async_trait::async_trait;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,26 @@ pub const MAX_TOOL_OUTPUT: usize = 8000;
 pub const COMMAND_IDLE_TIMEOUT_SECS: u64 = 300;
 /// 交互模式下的空闲超时（秒）。用户可 Ctrl+C 结束。
 pub const INTERACTIVE_IDLE_TIMEOUT_SECS: u64 = 1800;
+
+/// 工具是否正在运行（决定 Ctrl+C 是「中断命令」还是「退出程序」）
+pub static TOOL_RUNNING: AtomicBool = AtomicBool::new(false);
+/// 工具被 Ctrl+C 中断的标志（由全局 handler 置位，工具轮询）
+pub static TOOL_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+/// RAII：进入作用域置 TOOL_RUNNING=true，离开自动复位。
+struct ToolGuard;
+impl ToolGuard {
+    fn new() -> Self {
+        TOOL_INTERRUPT.store(false, Ordering::Relaxed);
+        TOOL_RUNNING.store(true, Ordering::Relaxed);
+        Self
+    }
+}
+impl Drop for ToolGuard {
+    fn drop(&mut self) {
+        TOOL_RUNNING.store(false, Ordering::Relaxed);
+    }
+}
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -74,6 +94,8 @@ impl Tool for ExecuteCommand {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| AgentError::Other("execute_command: 缺少非空 <command>".into()))?;
+
+        let _guard = ToolGuard::new();
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
 
@@ -134,7 +156,10 @@ impl Tool for ExecuteCommand {
         });
 
         let stop = Arc::new(AtomicBool::new(false));
-        let stdin_thread = if live {
+        // heredoc（含 `<<`）：即使 live 也不转发用户 stdin。
+        // 否则键盘输入会被 heredoc 消费命令的 stdin 吞掉，导致解释器进 REPL。
+        let has_heredoc = cmd.contains("<<");
+        let stdin_thread = if live && !has_heredoc {
             Some(spawn_stdin_forwarder(writer, stop.clone()))
         } else {
             drop(writer);
@@ -146,14 +171,35 @@ impl Tool for ExecuteCommand {
         } else {
             COMMAND_IDLE_TIMEOUT_SECS
         };
+
+        let tty = std::io::stdout().is_terminal();
+
         let mut timed_out = false;
+        let mut interrupted = false;
+        let mut idle = Duration::ZERO;
+        let tick = Duration::from_millis(200);
         loop {
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), rx.recv()).await {
-                Ok(Some(chunk)) => on_output(&chunk),
+            if TOOL_INTERRUPT.load(Ordering::Relaxed) {
+                interrupted = true;
+                break;
+            }
+            match tokio::time::timeout(tick, rx.recv()).await {
+                Ok(Some(chunk)) => {
+                    idle = Duration::ZERO;
+                    if tty && !live {
+                        print!("{chunk}");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    } else {
+                        on_output(&chunk);
+                    }
+                }
                 Ok(None) => break,
                 Err(_) => {
-                    timed_out = true;
-                    break;
+                    idle += tick;
+                    if idle >= Duration::from_secs(timeout_secs) {
+                        timed_out = true;
+                        break;
+                    }
                 }
             }
         }
@@ -169,6 +215,12 @@ impl Tool for ExecuteCommand {
         let captured = captured.lock().map(|c| c.clone()).unwrap_or_default();
 
         let clean = strip_ansi(&collapse_progress(&captured));
+        if interrupted {
+            return Ok(format!(
+                "[INTERRUPTED]\nexit_code: -1\n[中断] 命令被 Ctrl+C 终止\n{}",
+                truncate(clean, MAX_TOOL_OUTPUT)
+            ));
+        }
         if timed_out {
             return Ok(format!(
                 "exit_code: -1\n[超时] 命令超过 {timeout_secs}s 无输出，已终止\n{}",

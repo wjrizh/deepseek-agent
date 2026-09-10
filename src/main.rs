@@ -25,6 +25,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = ctrlc::set_handler(|| {
+        if deepseek_agent::agent::tool::TOOL_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+            deepseek_agent::agent::tool::TOOL_INTERRUPT
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            std::process::exit(130);
+        }
+    });
+
     let args = Args::parse();
 
     if let Some(t) = &args.token {

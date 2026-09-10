@@ -12,6 +12,7 @@ use crate::agent::tool::{ExecuteCommand, ToolRegistry};
 use crate::api::types::CompletionReq;
 use crate::error::Result;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// 解析失败的最大重试次数。
 const MAX_MALFORMED_RETRIES: u32 = 2;
@@ -39,6 +40,8 @@ pub struct Agent {
     restored: bool,
     /// 是否禁用本地会话恢复（/new 时临时用）
     force_new: bool,
+    /// 上一次向服务器同步 fork 状态的时间戳（30s 节流）
+    last_fork_check: Option<Instant>,
 }
 
 impl Agent {
@@ -60,6 +63,7 @@ impl Agent {
             store: SessionStore::default(),
             restored: false,
             force_new: false,
+            last_fork_check: None,
         }
     }
 
@@ -116,8 +120,8 @@ impl Agent {
                 && let Some(rec) = self.store.active_record()
             {
                 self.session_id = Some(rec.session_id.clone());
-                self.parent_message_id = rec.parent_message_id;
-                self.restored = true;
+self.parent_message_id = rec.parent_message_id;
+self.restored = true;
                 let tag = rec.title.as_deref().unwrap_or("(无标题)");
                 eprintln!(
                     "[session] 已恢复会话 {} · parent={:?} · {tag}",
@@ -159,12 +163,14 @@ impl Agent {
     ) -> Result<()> {
         self.memory.clear();
         self.prompt_sent = false;
+        // 若传入 parent 为 None，但本地已有记录，则保留本地 parent
+        let effective = parent.or_else(|| self.store.parent_of(&session_id));
         let mut rec = SessionRecord::new(session_id.clone());
-        rec.parent_message_id = parent;
+        rec.parent_message_id = effective;
         self.store.activate(rec)?;
         self.session_id = Some(session_id);
-        self.parent_message_id = parent;
-        self.force_new = false;
+self.parent_message_id = effective;
+self.force_new = false;
         self.restored = false;
         Ok(())
     }
@@ -185,6 +191,25 @@ impl Agent {
     pub async fn run(&mut self, input: &str) -> Result<ModelReply> {
         self.ensure_session().await?;
 
+        // fork 同步：30s 节流，检测服务器上该会话的最新 mid 是否领先本地 parent
+        {
+            let now = Instant::now();
+            let should_check = self
+                .last_fork_check
+                .map(|t| now.duration_since(t).as_secs() >= 30)
+                .unwrap_or(true);
+            if should_check {
+                self.last_fork_check = Some(now);
+                if let Some(sid) = self.session_id.clone()
+                    && let Ok(Some(server_mid)) =
+                        self.model.sync_parent(&sid, self.parent_message_id).await
+                {
+                    self.parent_message_id = Some(server_mid);
+                    let _ = self.store.update_parent(&sid, Some(server_mid));
+                }
+            }
+        }
+
         // 1. 记录用户消息
         self.memory.push(Message {
             role: Role::User,
@@ -204,7 +229,7 @@ impl Agent {
         loop {
             // 3. 构造请求
             let mut req = CompletionReq::new(self.session_id.clone().unwrap(), next_prompt.clone());
-            req.parent_message_id = self.parent_message_id;
+req.parent_message_id = self.parent_message_id;
             req.ref_file_ids = std::mem::take(&mut self.pending_files);
             if self.thinking {
                 req.model_type = "expert".into();
@@ -221,13 +246,18 @@ impl Agent {
                 })
                 .await?;
             ui.finish();
-            self.parent_message_id = reply.message_id;
 
-            if let Some(sid) = self.session_id.clone() {
-                let _ = self.store.update_parent(&sid, reply.message_id);
-                if let Some(t) = &reply.title {
-                    let _ = self.store.update_title(&sid, t);
+            // 仅当拿到有效 message_id 时才推进 parent（防止异常/中断路径把 parent 污染成 None）
+if reply.message_id.is_some() {
+                self.parent_message_id = reply.message_id;
+                if let Some(sid) = self.session_id.clone() {
+                    let _ = self.store.update_parent(&sid, reply.message_id);
                 }
+            }
+            if let Some(sid) = self.session_id.clone()
+                && let Some(t) = &reply.title
+            {
+                let _ = self.store.update_title(&sid, t);
             }
 
             // 5. 解析输出
@@ -242,9 +272,18 @@ impl Agent {
                 ParseOutcome::Call(call) => {
                     malformed_retries = 0;
                     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-                    // 仅 /free 模式下允许 PTY 抢 stdin 做交互，避免与审批输入冲突
                     let live = tty && self.free_mode;
                     let result = self.run_tool(&call, live).await;
+                    if result.starts_with("[INTERRUPTED]") {
+                        if tty {
+                            println!(
+                                "\n{}[已中断]{}",
+                                crate::ui::DIM,
+                                crate::ui::RESET
+                            );
+                        }
+                        return Ok(reply);
+                    }
                     if !tty {
                         crate::ui::print_tool_result(&result);
                     }
@@ -265,7 +304,9 @@ impl Agent {
                          Error: {reason}\n\
                          Your output was:\n{raw}\n\n\
                          Reply with EXACTLY ONE valid <execute_command> tool call, \
-                         or a plain text answer if no tool is needed."
+                         or a plain text answer if no tool is needed.\n\
+                         Do NOT quote the literal tags <tool_calls>/<invoke>/<parameter> \
+                         inside the command value."
                     );
                 }
             }

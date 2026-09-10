@@ -277,3 +277,125 @@ pub async fn delete_session(http: &HttpClient, session_id: &str) -> Result<()> {
     HttpClient::ensure_ok(v["code"].as_i64().unwrap_or(-1), v["msg"].as_str().unwrap_or(""))?;
     Ok(())
 }
+
+/// 会话的一条分支（从根到某个叶子的末端）
+#[derive(Debug, Clone)]
+pub struct Branch {
+    /// 叶子 mid（切到该分支时作 parent）
+    pub leaf_mid: i64,
+    /// 叶子消息的角色
+    pub role: String,
+    /// 该分支末端消息摘要（作「名称」）
+    pub summary: String,
+    /// 该分支上的消息数
+    pub size: usize,
+    /// 是否包含 current_message_id（即当前活跃分支）
+    pub is_current: bool,
+}
+
+/// 拉取会话，重建消息树，返回所有分支叶子（按 size 降序）。
+pub async fn session_branches(http: &HttpClient, session_id: &str) -> Result<Vec<Branch>> {
+    let url = format!(
+        "{}{}?chat_session_id={}",
+        http.base_url(),
+        PATH_HISTORY,
+        session_id
+    );
+    let headers = http.headers()?;
+    let resp = http.client().get(&url).headers(headers).send().await?;
+    let text = resp.text().await?;
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    HttpClient::ensure_ok(v["code"].as_i64().unwrap_or(-1), v["msg"].as_str().unwrap_or(""))?;
+    let bd = &v["data"]["biz_data"];
+    let current = bd["chat_session"]["current_message_id"].as_i64();
+
+    // 解析所有消息
+    let msgs: Vec<HistoryMessage> = bd["chat_messages"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let role = m["role"].as_str().unwrap_or("").to_string();
+                    let content = if let Some(frags) = m["fragments"].as_array() {
+                        let want = if role == "USER" { "REQUEST" } else { "RESPONSE" };
+                        frags
+                            .iter()
+                            .filter(|f| f["type"].as_str() == Some(want))
+                            .filter_map(|f| f["content"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    } else {
+                        m["content"].as_str().unwrap_or("").to_string()
+                    };
+                    Some(HistoryMessage {
+                        message_id: m["message_id"].as_i64()?,
+                        role,
+                        content,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 建 parent 映射 + 子节点计数
+    use std::collections::{HashMap, HashSet};
+    let mut parent: HashMap<i64, Option<i64>> = HashMap::new();
+    let mut by_id: HashMap<i64, &HistoryMessage> = HashMap::new();
+    let mut has_child: HashSet<i64> = HashSet::new();
+    for m in &msgs {
+        by_id.insert(m.message_id, m);
+        parent.insert(m.message_id, None); // 占位
+    }
+    // 二次解析 parent_id
+    if let Some(arr) = bd["chat_messages"].as_array() {
+        for m in arr {
+            if let (Some(mid), pid) = (m["message_id"].as_i64(), m["parent_id"].as_i64()) {
+                parent.insert(mid, pid);
+                if let Some(p) = pid {
+                    has_child.insert(p);
+                }
+            }
+        }
+    }
+
+    // 找所有叶子（无子节点的 mid）
+    let leaves: Vec<i64> = msgs
+        .iter()
+        .map(|m| m.message_id)
+        .filter(|mid| !has_child.contains(mid))
+        .collect();
+
+    // 对每个叶子回溯到根，算 size + 判断是否含 current
+    let mut branches: Vec<Branch> = Vec::new();
+    for leaf in leaves {
+        let mut size = 0usize;
+        let mut contains_current = false;
+        let mut cur = Some(leaf);
+        while let Some(mid) = cur {
+            size += 1;
+            if current == Some(mid) {
+                contains_current = true;
+            }
+            cur = parent.get(&mid).copied().flatten();
+        }
+        let m = by_id.get(&leaf);
+        let (role, summary) = match m {
+            Some(mm) => {
+                let seg = mm.content.rsplit("\n\n").next().unwrap_or(&mm.content);
+                let s: String = seg.replace('\n', " ").trim().chars().take(60).collect();
+                (mm.role.clone(), s)
+            }
+            None => (String::new(), String::new()),
+        };
+        branches.push(Branch {
+            leaf_mid: leaf,
+            role,
+            summary,
+            size,
+            is_current: contains_current,
+        });
+    }
+    // 按 size 降序（主链通常最长在前）
+    branches.sort_by_key(|a| std::cmp::Reverse(a.size));
+    Ok(branches)
+}

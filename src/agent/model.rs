@@ -31,6 +31,13 @@ pub trait Model: Send + Sync {
 
     /// 新建对话会话
     async fn new_session(&self) -> Result<String>;
+
+    /// 向服务器查询该会话的最新 message_id。
+    /// 返回 `Some(mid)` 表示应以服务器 mid 为准；`None` 表示后端不支持查询。
+    /// 默认实现不做任何事（返回 None），由具体后端按需覆盖。
+    async fn sync_parent(&self, _session_id: &str, _local: Option<i64>) -> Result<Option<i64>> {
+        Ok(None)
+    }
 }
 
 /// DeepSeek 后端实现
@@ -64,5 +71,12 @@ Ok(ModelReply {
 
     async fn new_session(&self) -> Result<String> {
         crate::api::chat::create_session(&self.http).await
+    }
+
+    async fn sync_parent(&self, session_id: &str, _local: Option<i64>) -> Result<Option<i64>> {
+        match crate::api::chat::latest_message_id(&self.http, session_id).await {
+            Ok(server_mid) => Ok(server_mid),
+            Err(_) => Ok(None),
+        }
     }
 }

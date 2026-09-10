@@ -187,7 +187,11 @@ fn parse_native(text: &str) -> Option<ParseOutcome> {
             reason: "检测到 <tool_calls> 但缺少 <invoke name=...>".into(),
         });
     }
-    if names.len() > 1 {
+    // 去重后判断（同一工具名重复出现不算多工具调用）
+    let mut uniq = names.clone();
+    uniq.sort();
+    uniq.dedup();
+    if uniq.len() > 1 {
         return Some(ParseOutcome::Malformed {
             raw: text.trim().to_string(),
             reason: "一次只能调用一个工具".into(),
@@ -195,13 +199,25 @@ fn parse_native(text: &str) -> Option<ParseOutcome> {
     }
 
     let name = &names[0];
+    let name_lc = name.to_ascii_lowercase();
     let canonical = match KNOWN_TOOLS.iter().find(|t| t.eq_ignore_ascii_case(name)) {
         Some(t) => (*t).to_string(),
         None => {
-            return Some(ParseOutcome::Malformed {
-                raw: text.trim().to_string(),
-                reason: format!("未知工具: {name}"),
+            // 容忍输出截断：若 name 是某已知工具名的前缀（且足够长，≥6 字符），
+            // 视为该工具（例如 "execute_com" → "execute_command"）。
+            let hit = KNOWN_TOOLS.iter().find(|t| {
+                let t_lc = t.to_ascii_lowercase();
+                name_lc.len() >= 6 && t_lc.starts_with(&name_lc)
             });
+            match hit {
+                Some(t) => (*t).to_string(),
+                None => {
+                    return Some(ParseOutcome::Malformed {
+                        raw: text.trim().to_string(),
+                        reason: format!("未知工具: {name}"),
+                    });
+                }
+            }
         }
     };
 
@@ -222,11 +238,17 @@ fn parse_native(text: &str) -> Option<ParseOutcome> {
 }
 
 /// 收集所有 invoke 开标签上的 name 属性（小写）。
+/// 跳过 <parameter> 内容区内的伪标签（模型可能在 command 里引述工具格式）。
 fn collect_invoke_names(lower: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut i = 0;
     while let Some(rel) = lower[i..].find("<invoke") {
         let start = i + rel;
+        // 落在 <parameter> 内容区内的伪标签：忽略
+        if inside_parameter(lower, start) {
+            i = start + "<invoke".len();
+            continue;
+        }
         let after = start + "<invoke".len();
         let boundary_ok = matches!(
             lower[after..].chars().next(),
@@ -246,6 +268,19 @@ fn collect_invoke_names(lower: &str) -> Vec<String> {
         i = start + gt + 1;
     }
     names
+}
+
+/// `pos` 是否位于某个 `<parameter ...>` 与其闭合标签之间。
+/// 用于忽略参数体内引述的伪工具标签。
+fn inside_parameter(lower: &str, pos: usize) -> bool {
+    let before = &lower[..pos];
+    let last_open = before.rfind("<parameter");
+    let last_close = before.rfind("</parameter");
+    match (last_open, last_close) {
+        (Some(o), Some(c)) => o > c,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 /// 提取 parameter 元素为参数表（同名保留首个）。
@@ -770,6 +805,36 @@ mod tests {
                 );
             }
             other => panic!("属性冒号被误伤: {other:?}"),
+        }
+    }
+    #[test]
+    fn nested_fake_tags_in_command_ignored() {
+        let input = "<tool_calls>\n\
+            <invoke name=\"execute_command\">\n\
+            <parameter name=\"command\" string=\"true\">echo '<tool_calls><invoke name=\"execute_command\"><parameter name=\"command\">ls</parameter></invoke></tool_calls>'</parameter>\n\
+            </invoke>\n\
+            </tool_calls>";
+        match parse(input) {
+            ParseOutcome::Call(c) => {
+                assert_eq!(c.name, "execute_command");
+                let cmd = c.params.get("command").expect("command 参数");
+                assert!(cmd.contains("ls"), "command 应含 ls，实际: {cmd}");
+                assert!(!cmd.is_empty());
+            }
+            other => panic!("期望 Call，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_tool_name_matches_prefix() {
+        let input = "<tool_calls>\n\
+            <invoke name=\"execute_com\">\n\
+            <parameter name=\"command\">ls</parameter>\n\
+            </invoke>\n\
+            </tool_calls>";
+        match parse(input) {
+            ParseOutcome::Call(c) => assert_eq!(c.name, "execute_command"),
+            other => panic!("期望 Call，得到 {other:?}"),
         }
     }
 }
