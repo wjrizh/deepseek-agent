@@ -8,6 +8,11 @@ use base64::Engine;
 
 pub const PATH_UPLOAD: &str = "/api/v0/file/upload_file";
 
+/// 单次调用最多上传的文件数。
+pub const MAX_UPLOAD_FILES: usize = 50;
+/// 单个文件大小上限（100MB）。
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
 /// 上传文件，返回 FileInfo
 pub async fn upload(
     http: &HttpClient,

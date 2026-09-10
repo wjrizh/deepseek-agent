@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 /// 已知工具名（唯一真源；新增工具需在此登记 + 实现 `Tool`）。
-pub const KNOWN_TOOLS: &[&str] = &["execute_command"];
+pub const KNOWN_TOOLS: &[&str] = &["execute_command", "upload_file"];
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -533,7 +533,10 @@ fn extract_element(haystack: &str, name: &str) -> Option<String> {
     let gt = lower[open_start..].find('>')?;
     let content_start = open_start + gt + 1;
     let close_pat = format!("</{name}");
-    let close_rel = lower[content_start..].find(&close_pat)?;
+    let close_rel = match lower[content_start..].find(&close_pat) {
+        Some(r) => r,
+        None => lower[content_start..].find("</")?,
+    };
     Some(haystack[content_start..content_start + close_rel].to_string())
 }
 
@@ -589,6 +592,13 @@ fn validate(name: &str, params: &HashMap<String, String>) -> std::result::Result
             let cmd = params.get("command").map(|s| s.trim()).unwrap_or("");
             if cmd.is_empty() {
                 return Err("缺少非空的 <command> 参数".into());
+            }
+            Ok(())
+        }
+        "upload_file" => {
+            let paths = params.get("paths").map(|s| s.trim()).unwrap_or("");
+            if paths.is_empty() {
+                return Err("缺少非空的 <paths> 参数".into());
             }
             Ok(())
         }

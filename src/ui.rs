@@ -627,6 +627,9 @@ impl LiveUi {
     }
 
     pub fn finish(&mut self) {
+        if !self.answer_started {
+            self.end_thinking();
+        }
         if self.answer_started {
             let f = self.filter.finish();
             let mut p = self.painter.feed(&f);
@@ -657,6 +660,8 @@ pub struct PlainUi {
     filter: TagFilter,
     painter: Painter,
     prefix_printed: bool,
+    spinner_on: bool,
+    tick: usize,
 }
 
 impl PlainUi {
@@ -667,15 +672,36 @@ impl PlainUi {
             filter: TagFilter::new(),
             painter: Painter::new(),
             prefix_printed: false,
+            spinner_on: false,
+            tick: 0,
         }
     }
 
     pub fn on_delta(&mut self, kind: DeltaKind, text: &str) {
         match kind {
-            DeltaKind::Thinking => {}
+            DeltaKind::Thinking => {
+                if self.answer_started {
+                    return;
+                }
+                const SPIN: [char; 10] =
+                    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                if !self.spinner_on {
+                    self.spinner_on = true;
+                    print!("{DIM}");
+                }
+                self.tick += 1;
+                let s = SPIN[self.tick % SPIN.len()];
+                print!("\r\x1b[K{s} thinking...");
+                let _ = std::io::stdout().flush();
+            }
             DeltaKind::Answer => {
                 if !self.answer_started {
                     self.answer_started = true;
+                    if self.spinner_on {
+                        self.spinner_on = false;
+                        print!("\r\x1b[K{RESET}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
                 let filtered = self.filter.feed(text);
                 let painted = self.painter.feed(&filtered);
@@ -693,6 +719,11 @@ impl PlainUi {
     }
 
     pub fn finish(&mut self) {
+        if self.spinner_on {
+            self.spinner_on = false;
+            print!("\r\x1b[K{RESET}");
+            let _ = std::io::stdout().flush();
+        }
         if self.answer_started {
             let f = self.filter.finish();
             let mut p = self.painter.feed(&f);
@@ -728,14 +759,7 @@ pub enum AnyUi {
 
 impl AnyUi {
     pub fn new() -> Self {
-        if std::io::stdout().is_terminal() {
-            match LiveUi::new() {
-                Ok(ui) => AnyUi::Live(ui),
-                Err(_) => AnyUi::Plain(PlainUi::new()),
-            }
-        } else {
-            AnyUi::Plain(PlainUi::new())
-        }
+        AnyUi::Plain(PlainUi::new())
     }
 
     pub fn on_delta(&mut self, kind: DeltaKind, text: &str) {

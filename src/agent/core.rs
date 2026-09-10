@@ -11,7 +11,7 @@ use crate::agent::session_store::{SessionRecord, SessionStore};
 use crate::agent::tool::{ExecuteCommand, ToolRegistry};
 use crate::api::types::CompletionReq;
 use crate::error::Result;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// 解析失败的最大重试次数。
@@ -25,7 +25,7 @@ pub struct Agent {
     /// 上一轮回复的消息 id（续接上下文用）
     parent_message_id: Option<i64>,
     /// 待引用文件 id
-    pending_files: Vec<String>,
+    pending_files: Arc<Mutex<Vec<String>>>,
     /// 是否开启思考模式（expert + thinking）
     thinking: bool,
     /// 是否开启联网搜索
@@ -55,7 +55,7 @@ impl Agent {
             tools,
             session_id: None,
             parent_message_id: None,
-            pending_files: Vec::new(),
+            pending_files: Arc::new(Mutex::new(Vec::new())),
             thinking: false,
             search: false,
             prompt_sent: false,
@@ -103,14 +103,21 @@ impl Agent {
         self
     }
 
+    /// 取得待上传文件队列的共享句柄（供 upload_file 工具写入）。
+    pub fn pending_handle(&self) -> Arc<Mutex<Vec<String>>> {
+        self.pending_files.clone()
+    }
+
     /// 注册工具（扩展点）
     pub fn register_tool(&mut self, tool: Box<dyn crate::agent::tool::Tool>) {
         self.tools.register(tool);
     }
 
     /// 附加文件 id 到下一次请求
-    pub fn attach_file(&mut self, file_id: impl Into<String>) {
-        self.pending_files.push(file_id.into());
+    pub fn attach_file(&self, file_id: impl Into<String>) {
+        if let Ok(mut p) = self.pending_files.lock() {
+            p.push(file_id.into());
+        }
     }
 
     /// 确保会话存在：优先恢复持久化会话，否则新建。
@@ -230,7 +237,7 @@ self.force_new = false;
             // 3. 构造请求
             let mut req = CompletionReq::new(self.session_id.clone().unwrap(), next_prompt.clone());
 req.parent_message_id = self.parent_message_id;
-            req.ref_file_ids = std::mem::take(&mut self.pending_files);
+            req.ref_file_ids = self.pending_files.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
             if self.thinking {
                 req.model_type = "expert".into();
                 req.thinking_enabled = true;

@@ -36,6 +36,18 @@ To run a command, reply with EXACTLY this structure and nothing else:
 </invoke>
 </tool_calls>
 
+Available tools:
+
+- execute_command: run a shell command in the project working directory.
+- upload_file: upload an image or PDF that requires vision to read. Params:
+  <tool_calls>
+  <invoke name="upload_file">
+  <parameter name="paths">/path/to/a.png,/path/to/b.pdf</parameter>
+  </invoke>
+  </tool_calls>
+  paths: one or more file paths, separated by newline or comma. Only images
+  and PDFs are accepted; for text files use execute_command to read them.
+
 Rules:
 - Nothing before or after the block. No markdown fences, no explanations.
 - Use the tag names EXACTLY as shown. No prefixes, suffixes, or extra

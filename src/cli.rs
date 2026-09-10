@@ -43,10 +43,11 @@ fn extract_at_paths(input: &str) -> (String, Vec<String>) {
                     continue;
                 }
             }
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            (rest[..end].to_string(), end)
-        };
+} else {
+    // 无引号：读到下一个 '@' 或行尾（允许路径含空格）
+    let end = rest.find('@').unwrap_or(rest.len());
+    (rest[..end].trim_end().to_string(), end)
+};
         let _ = bytes;
         paths.push(path);
         i = after + consumed;
@@ -194,6 +195,11 @@ pub async fn run(
     let mut agent = Agent::new(rt.model()).with_session_store(store);
     agent.set_thinking(thinking);
 
+    agent.register_tool(Box::new(crate::agent::tool::UploadFile::new(
+        rt.http.clone(),
+        rt.solver.clone(),
+        agent.pending_handle(),
+    )));
     for f in &files {
         let mut solver = rt.solver.lock().await;
         let info = file::upload(&rt.http, &mut solver, f).await?;

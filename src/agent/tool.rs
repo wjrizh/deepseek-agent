@@ -97,6 +97,43 @@ impl Tool for ExecuteCommand {
 
         let _guard = ToolGuard::new();
 
+        // 硬拦截 heredoc：PTY 下不可靠（stdin/换行/嵌套都易卡 REPL）。
+        // 用宽松检测（<< 后跟引号/字母才拦，误伤不了 1 << 2 之类位运算）。
+        let has_heredoc = {
+            let bytes = cmd.as_bytes();
+            let mut found = false;
+            let mut i = 0;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'<' && bytes[i + 1] == b'<' {
+                    let mut j = i + 2;
+                    if j < bytes.len() && bytes[j] == b'-' {
+                        j += 1;
+                    }
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len()
+                        && (bytes[j] == b'\'' || bytes[j] == b'"' || bytes[j].is_ascii_alphabetic())
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            found
+        };
+        if has_heredoc {
+            return Ok(
+                "[错误] 检测到 heredoc（<<），本环境不支持。请改用以下方式之一：\n\
+                 1. python3 -c 'import x; ...'  （单行，分号分隔）\n\
+                 2. 先用 write_file 工具/printf 写文件，再 python3 文件.py\n\
+                 3. 用 echo -e '...' 管道\n\
+                 禁止使用 <<'PY' / <<EOF 等 heredoc 语法。"
+                    .to_string(),
+            );
+        }
+
         let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
 
         let pty_system = native_pty_system();
@@ -348,6 +385,103 @@ fn truncate(s: String, max: usize) -> String {
     let mut t: String = s.chars().take(max).collect();
     t.push_str("\n...[输出已截断]");
     t
+}
+
+/// 内置工具：上传需视觉读取的文件（图片/PDF），返回 file_id 并注入下一轮请求。
+pub struct UploadFile {
+    http: Arc<crate::client::http::HttpClient>,
+    solver: Arc<tokio::sync::Mutex<crate::client::pow::PowSolver>>,
+    pending: Arc<Mutex<Vec<String>>>,
+}
+
+impl UploadFile {
+    pub fn new(
+        http: Arc<crate::client::http::HttpClient>,
+        solver: Arc<tokio::sync::Mutex<crate::client::pow::PowSolver>>,
+        pending: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            http,
+            solver,
+            pending,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for UploadFile {
+    fn name(&self) -> &str {
+        "upload_file"
+    }
+
+    fn description(&self) -> &str {
+        "上传文件给模型（图片、PDF 及任意类型文件均可）。参数 paths 为待上传文件路径，多个用换行或逗号分隔。单次最多 50 个文件，单个文件不超过 100MB。"
+    }
+
+    async fn call(
+        &self,
+        params: &HashMap<String, String>,
+        _live: bool,
+        _on_output: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> Result<String> {
+        let raw = params
+            .get("paths")
+            .map(|s| s.as_str())
+            .ok_or_else(|| AgentError::Other("upload_file: 缺少 <paths>".into()))?;
+
+        let paths: Vec<String> = raw
+            .split(['\n', ','])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if paths.is_empty() {
+            return Err(AgentError::Other("upload_file: <paths> 为空".into()));
+        }
+
+        if paths.len() > crate::api::file::MAX_UPLOAD_FILES {
+            return Err(AgentError::Other(format!(
+                "upload_file: 一次最多上传 {} 个文件，当前 {} 个，请分批次上传",
+                crate::api::file::MAX_UPLOAD_FILES,
+                paths.len()
+            )));
+        }
+
+
+        let mut lines = Vec::new();
+        for p in &paths {
+            let path = std::path::Path::new(p);
+            if !path.exists() {
+                lines.push(format!("[!] 文件不存在: {p}"));
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.len() > crate::api::file::MAX_FILE_SIZE {
+                    lines.push(format!(
+                        "[!] 文件过大（{} 字节，上限 {} 字节），不能直接上传: {p}",
+                        meta.len(),
+                        crate::api::file::MAX_FILE_SIZE
+                    ));
+                    continue;
+                }
+            }
+            let mut solver = self.solver.lock().await;
+            let r = crate::api::file::upload(&self.http, &mut solver, path).await;
+            drop(solver);
+            match r {
+                Ok(info) => {
+                    if let Ok(mut pend) = self.pending.lock() {
+                        pend.push(info.id.clone());
+                    }
+                    lines.push(format!(
+                        "[✓] 已上传: {} (file_id={}, is_image={})",
+                        info.file_name, info.id, info.is_image
+                    ));
+                }
+                Err(e) => lines.push(format!("[!] 上传失败 {p}: {e}")),
+            }
+        }
+        Ok(lines.join("\n"))
+    }
 }
 
 #[derive(Default)]
