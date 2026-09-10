@@ -154,12 +154,10 @@ impl TokenProvider {
             .send()
             .await;
         match resp {
-            Ok(r) if r.status().is_success() => {
-                match r.json::<serde_json::Value>().await {
-                    Ok(v) => v.get("code").and_then(|c| c.as_i64()) == Some(0),
-                    Err(_) => false,
-                }
-            }
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) => v.get("code").and_then(|c| c.as_i64()) == Some(0),
+                Err(_) => false,
+            },
             _ => false,
         }
     }

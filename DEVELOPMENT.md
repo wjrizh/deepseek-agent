@@ -3,7 +3,7 @@
 ```markdown
 # DeepSeek Agent (Rust) — 开发文档
 
-> 版本 0.2.0 | 2026-09-10 | 纯 Rust 实现的 DeepSeek Agent
+> 版本 0.3.0 | 2026-09-11 | 纯 Rust 实现的 DeepSeek Agent
 > 代码 ~2600 行 | 二进制 13MB | 编译 `cargo build --release`
 
 ---
@@ -20,30 +20,44 @@ API 成为可能。
 ## 二、快速开始
 
 ```bash
+**一键安装**（装为全局命令 `lg2`）：
+
+```bash
+git clone git@github.com:wjrizh/deepseek-agent.git
+cd deepseek-agent
+./install.sh              # → ~/.local/bin/lg2（用户级）
+# 或 sudo ./install.sh   # → /usr/local/bin/lg2（全局）
+lg2                       # 任意终端直接启动
+```
+
+**手动构建**：
+
+```bash
 cd /home/z/deepseek-agent
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release
 
-# 单次问答
-./target/release/deepseek-agent "你好"
-
-# 带文件问答
-./target/release/deepseek-agent "总结这份文档" --file /path/doc.pdf
-
-# 交互式多轮对话
-./target/release/deepseek-agent
-
-# 手动指定 token
-./target/release/deepseek-agent --token "xxx" "问题"
+lg2 "你好"                              # 单次问答
+lg2 "总结这份文档" --file /path/doc.pdf  # 带文件
+lg2 --thinking "问题"                    # 思考模式
+lg2 --token "xxx" "问题"                 # 手动指定 token
+lg2                                      # 交互式多轮对话
+```
 ```
 
 交互模式内置命令：
 
 | 命令 | 作用 |
 |---|---|
+| `/help` | 显示帮助 |
+| `/new` | 开新会话 |
+| `/sessions` | 列出在线历史会话（●可续接 / ○仅归档） |
+| `/switch <id前缀>` | 切换会话（Tab 可补全） |
+| `/delete <id...>` | 删除 1 个或多个会话（前缀匹配，需确认） |
 | `/free` | 自动批准后续所有命令（免确认） |
 | `/safe` | 恢复命令确认 |
 | `exit` / `quit` / `退出` | 退出 |
+| Tab | 补全命令 / 会话 id |
 
 ---
 
@@ -114,6 +128,7 @@ cargo build --release
 | `src/api/chat.rs` | 137 | 会话+对话 | SSE 流式接收 |
 | `src/agent/core.rs` | ~230 | **Agent 主循环** | 工具循环 + 有界重试 + /free |
 | `src/agent/model.rs` | 62 | Model trait | LLM 后端抽象 |
+| `src/agent/session_store.rs` | ~130 | **会话持久化** | session_id + parent 存盘（0600） |
 | `src/agent/memory.rs` | 46 | Memory trait | 对话历史 |
 | `src/agent/parser.rs` | ~750 | **工具解析** | 双格式 + DSML 归一化 + 20 测试 |
 | `src/agent/prompt.rs` | ~50 | 系统提示词 | 行为准则 + 工具格式 |
@@ -167,7 +182,48 @@ data: {"p":"response/status","o":"SET","v":"FINISHED"}  ← 结束（跳过）
 event: close
 ```
 
-### 5.5 PoW 算法（DeepSeekHashV1）
+### 5.5 历史会话列表 & 历史消息
+
+**列出全部在线会话**（GET，无需参数）：
+
+```
+GET /api/v0/chat_session/fetch_page
+→ {"code":0,"data":{"biz_data":{"chat_sessions":[
+    {"id":"...","title":"力工问候","title_type":"SYSTEM",
+     "pinned":false,"model_type":"default","updated_at":1789056153.087}
+  ]}}}
+```
+- `title` 服务端自动生成（比 SSE 的 Title 事件更可靠）
+- ⚠️ 方法是 **GET**（POST 返回 405）；`/chat_session/list`、`/page` 不存在
+
+**取会话历史消息**（GET，query 参数）：
+
+```
+GET /api/v0/chat/history_messages?chat_session_id=<id>
+→ {"code":0,"data":{"biz_data":{
+     "chat_session":{"id":"...","title":"...","current_message_id":78,
+                     "is_empty":false,"updated_at":...},
+     "chat_messages":[ ... ]
+   }}}
+```
+- ⚠️ 路径是 `/api/v0/chat/**history_messages**`（不是 `chat_session`）
+- `chat_session.current_message_id` = 该会话**最新 message_id** →
+  切换会话时直接拿它当 `parent_message_id`，即可**完美续接任意历史会话**
+- `chat_messages[]` 单条两种 schema（**同一接口因请求头不同返回不同格式！**）：
+
+| 格式 | 字段 | 正文位置 |
+|---|---|---|
+| 新版（reqwest 客户端） | `fragments[]` | `fragments[].content`，按 `type` 区分 |
+| 旧版（urllib 等） | `content` | 直接字符串 |
+
+`fragments[].type` 取值：
+- `REQUEST` — 用户输入（**含系统提示词前缀**，取真实输入需 `rsplit("\n\n")` 取末段）
+- `THINK` — 思考过程
+- `RESPONSE` — 最终回答 ← 展示历史时取这个
+
+> 解析时**优先 `fragments`，回退 `content`**，两种格式都兼容。
+
+### 5.6 PoW 算法（DeepSeekHashV1）
 
 ```
 prefix = salt + "_" + expire_at + "_"
@@ -213,6 +269,45 @@ userToken 会变（重登/切换账号/服务端刷新），但非每次
 ~/.deepseek-agent/token.json          (0600 权限)
 ~/.deepseek-agent/browser/            (Chromium profile, 8.7MB, 含登录态)
 ```
+
+---
+
+## 六·五、会话持久化
+
+**目标**：重启后恢复上次对话；支持多会话切换。
+
+**存储**：`~/.deepseek-agent/session.json`（0600）
+
+```json
+{
+  "active": "26fec201-2b25-4ce0-89a8-c5631f4a2670",
+  "sessions": [
+    {"session_id":"...","parent_message_id":4,"title":"小明打招呼","updated_at":1789056050}
+  ]
+}
+```
+
+**核心事实**：续接上下文只需 `session_id` + `parent_message_id`
+（= 上次的 `response_message_id`），服务端已存历史，本地不存整段对话。
+
+**恢复流程**（`Agent::ensure_session`）：
+```
+session_id 为空？
+  ├ 有 store.active → 恢复 session_id + parent_message_id（打印 [session] 已恢复）
+  └ 无 → model.new_session() 新建并落盘
+每轮回复后 → store.update_parent(sid, reply.message_id) 落盘
+```
+
+**切换会话**（`/switch <前缀>`）：
+```
+1. chat::list_sessions() 前缀匹配（唯一才生效）
+2. chat::history_tail(sid, 3) 拉最新 message_id + 最近 3 条
+3. parent = 本地记录的 parent（优先）或 online current_message_id
+4. agent.switch_session(sid, parent)
+```
+
+**为何 parent 本地优先**：本地记录的是「上次回复的 response_message_id」，
+链最准；在线 `current_message_id` 是会话最新 mid，也能续接（实测有效）。
 
 ---
 
@@ -395,12 +490,16 @@ PoW 求解:      0.17s (release) / 29s (debug)
 | 命令输出丢失 | `\r\n` 被吃 | `collapse_progress` 先归一 |
 | XML 显示出来 | TagFilter 旧版 | 同步 parser 的归一化 |
 | 交互按键无反应 | stdin 转发未启动 | 确认 `live=true` |
+| 历史消息内容为空 | 服务端返回 `fragments` 格式 | 优先解析 `fragments[].content` |
+| `/switch` 接不上上下文 | parent 缺失 | 用 `current_message_id` 兜底 |
+| `fetch_page` 405 | 用了 POST | 改 GET |
 
 ---
 
 ## 十二、后续开发路线
 
 - [x] 工具系统落地（execute_command + PTY + /free）
+- [x] 会话持久化 + 多会话切换（/sessions /switch /new + Tab 补全）
 - [ ] 更多工具（read_file / write_file / search）
 - [ ] 持久化记忆（SQLite）
 - [ ] 流式输出可选关闭（`--no-stream`）

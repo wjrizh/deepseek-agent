@@ -26,7 +26,9 @@ impl SseParser {
         let v: Value = serde_json::from_str(json_str).ok()?;
 
         if let Some(rid) = v.get("response_message_id").and_then(|x| x.as_i64()) {
-            return Some(ChatEvent::Ready { response_message_id: rid });
+            return Some(ChatEvent::Ready {
+                response_message_id: rid,
+            });
         }
 
         let op = v.get("o").and_then(|x| x.as_str());
@@ -89,9 +91,8 @@ mod tests {
         let mut p = SseParser::new();
 
         // 初始 THINK 带 content → 应输出
-        let e = p.parse_line(
-            r#"{"v":{"response":{"fragments":[{"type":"THINK","content":"思考"}]}}}"#,
-        );
+        let e =
+            p.parse_line(r#"{"v":{"response":{"fragments":[{"type":"THINK","content":"思考"}]}}}"#);
         assert!(matches!(e, Some(ChatEvent::Delta(DeltaKind::Thinking, s)) if s == "思考"));
 
         let e = p.parse_line(r#"{"v":"更多思考"}"#).unwrap();
@@ -110,9 +111,10 @@ mod tests {
     #[test]
     fn skips_status() {
         let mut p = SseParser::new();
-        assert!(p
-            .parse_line(r#"{"p":"response/status","o":"SET","v":"FINISHED"}"#)
-            .is_none());
+        assert!(
+            p.parse_line(r#"{"p":"response/status","o":"SET","v":"FINISHED"}"#)
+                .is_none()
+        );
     }
 
     #[test]

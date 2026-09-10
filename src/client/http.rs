@@ -3,8 +3,8 @@
 use crate::auth::TokenProvider;
 use crate::config::{CLIENT_BUNDLE_ID, CLIENT_VERSION};
 use crate::error::{AgentError, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 pub struct HttpClient {
     client: Client,

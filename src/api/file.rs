@@ -53,10 +53,13 @@ pub async fn upload(
     }
     let parsed: ApiResponse<FileInfo> = serde_json::from_str(&text)?;
     HttpClient::ensure_ok(parsed.code, &parsed.msg)?;
-    parsed.data.and_then(|d| d.biz_data).ok_or_else(|| AgentError::Api {
-        code: -1,
-        msg: "上传响应缺少 biz_data".into(),
-    })
+    parsed
+        .data
+        .and_then(|d| d.biz_data)
+        .ok_or_else(|| AgentError::Api {
+            code: -1,
+            msg: "上传响应缺少 biz_data".into(),
+        })
 }
 
 /// 生成 `x-ds-pow-response` 头的值

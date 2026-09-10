@@ -90,22 +90,13 @@ fn normalize_tag_names(text: &str) -> String {
 /// 供 UI 层的 TagFilter 等复用，避免逻辑漂移。
 /// 输入可以是带 '<' 的完整标签（如 `<｜｜DSML｜｜ invoke`）或纯标签名区。
 pub fn normalize_tag_prefix(tag: &str) -> String {
-    let is_pipe = |c: char| c == '|' || c == '｜';
-    let mut t = tag.trim_start();
-    if let Some(rest) = t.strip_prefix('<') {
-        t = rest.trim_start();
-    }
-    if t.starts_with(is_pipe) {
-        let s1 = t.trim_start_matches(is_pipe);
-        if let Some(rel) = s1.find(is_pipe) {
-            t = s1[rel..].trim_start_matches(is_pipe);
-        } else {
-            t = s1;
-        }
-    }
-    // 如果原来带 '<'，补回来，给 ui.rs 做前缀匹配用
-    if tag.trim_start().starts_with('<') {
-        format!("<{}", t)
+    let had_lt = tag.trim_start().starts_with('<');
+    let t = tag.trim_start();
+    let t = t.strip_prefix('<').unwrap_or(t);
+    // 跳过 `<` 后所有非 ASCII 字母字符（竖线/空格/DSML 标记统统跳过）
+    let t = t.trim_start_matches(|c: char| !c.is_ascii_alphabetic() && c != '/');
+    if had_lt {
+        format!("<{t}")
     } else {
         t.to_string()
     }
@@ -138,7 +129,7 @@ fn rewrite_tag(tag: &str) -> String {
         None => (false, inner),
     };
 
-        // 1. 成对剥离厂商标记块：形如 ｜｜DSML｜｜ 或 ||DSML||
+    // 1. 成对剥离厂商标记块：形如 ｜｜DSML｜｜ 或 ||DSML||
     //    跳过前导竖线 → 跳到闭合竖线 → 跳过闭合竖线，得到真正的标签名区。
     let mut t = after_slash.trim_start();
     let is_pipe = |c: char| c == '|' || c == '｜';
@@ -245,7 +236,9 @@ fn collect_invoke_names(lower: &str) -> Vec<String> {
             i = after;
             continue;
         }
-        let Some(gt) = lower[start..].find('>') else { break };
+        let Some(gt) = lower[start..].find('>') else {
+            break;
+        };
         let open_tag = &lower[start..start + gt + 1];
         if let Some(n) = extract_attr(open_tag, "name") {
             names.push(n);
@@ -276,7 +269,9 @@ fn extract_parameters(body: &str) -> HashMap<String, String> {
             i = after;
             continue;
         }
-        let Some(gt) = lower[start..].find('>') else { break };
+        let Some(gt) = lower[start..].find('>') else {
+            break;
+        };
         let open_end = start + gt + 1;
         let open_tag = &body[start..open_end];
         let key = match extract_attr(open_tag, "name") {
@@ -333,9 +328,7 @@ fn find_lenient_close(lower: &str, from: usize, name: &str) -> Option<(usize, us
                 lower[after_name..].chars().next(),
                 Some(c) if c == '>' || c.is_whitespace() || c == '/'
             );
-            if boundary_ok
-                && let Some(gt) = lower[after_name..].find('>')
-            {
+            if boundary_ok && let Some(gt) = lower[after_name..].find('>') {
                 let close_end = after_name + gt + 1;
                 return Some((lt, close_end));
             }
@@ -347,7 +340,10 @@ fn find_lenient_close(lower: &str, from: usize, name: &str) -> Option<(usize, us
 
 /// 完全没有闭合标签时的兜底：截到下一个标签起点；没有则到串尾。
 fn next_boundary(lower: &str, from: usize) -> usize {
-    lower[from..].find('<').map(|r| from + r).unwrap_or(lower.len())
+    lower[from..]
+        .find('<')
+        .map(|r| from + r)
+        .unwrap_or(lower.len())
 }
 
 /// 从标签里取属性值，兼容双引号 / 单引号 / 无引号。
@@ -523,12 +519,11 @@ fn extract_params(body: &str) -> HashMap<String, String> {
             }
         }
         let name_start = lt + 1;
-        let name_end = match lower[name_start..]
-            .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
-        {
-            Some(r) => name_start + r,
-            None => break,
-        };
+        let name_end =
+            match lower[name_start..].find(|c: char| c == '>' || c == '/' || c.is_whitespace()) {
+                Some(r) => name_start + r,
+                None => break,
+            };
         let key = lower[name_start..name_end].trim().to_string();
         let Some(g) = lower[name_end..].find('>') else {
             break;
@@ -572,7 +567,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_text() {
-        assert!(matches!(parse("你好，这是普通回答。"), ParseOutcome::Text(_)));
+        assert!(matches!(
+            parse("你好，这是普通回答。"),
+            ParseOutcome::Text(_)
+        ));
     }
 
     // ---- DeepSeek 原生格式 ----
@@ -622,11 +620,9 @@ mod tests {
                  </invoke>\n</tool_calls>"
             );
             match parse(&input) {
-                ParseOutcome::Call(c) => assert_eq!(
-                    c.params.get("command").unwrap(),
-                    "pwd",
-                    "close={close:?}"
-                ),
+                ParseOutcome::Call(c) => {
+                    assert_eq!(c.params.get("command").unwrap(), "pwd", "close={close:?}")
+                }
                 other => panic!("close={close:?} expected Call, got {other:?}"),
             }
         }
@@ -768,7 +764,10 @@ mod tests {
         match parse(&input) {
             ParseOutcome::Call(c) => {
                 assert_eq!(c.name, "execute_command");
-                assert_eq!(c.params.get("command").unwrap(), "curl http://localhost:8080");
+                assert_eq!(
+                    c.params.get("command").unwrap(),
+                    "curl http://localhost:8080"
+                );
             }
             other => panic!("属性冒号被误伤: {other:?}"),
         }

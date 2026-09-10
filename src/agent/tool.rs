@@ -13,8 +13,8 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -166,7 +166,7 @@ impl Tool for ExecuteCommand {
             let _ = t.join();
         }
 
-let captured = captured.lock().map(|c| c.clone()).unwrap_or_default();
+        let captured = captured.lock().map(|c| c.clone()).unwrap_or_default();
 
         let clean = strip_ansi(&collapse_progress(&captured));
         if timed_out {
@@ -313,11 +313,17 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.as_ref())
     }
 
     pub fn list(&self) -> Vec<(&str, &str)> {
-        self.tools.iter().map(|t| (t.name(), t.description())).collect()
+        self.tools
+            .iter()
+            .map(|t| (t.name(), t.description()))
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {

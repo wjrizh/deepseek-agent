@@ -7,10 +7,10 @@
 use crate::api::types::DeltaKind;
 use crate::error::{AgentError, Result};
 use crossterm::cursor::Show;
-use crossterm::event::{read, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::execute;
-use std::io::{stdout, IsTerminal, Write};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use std::io::{IsTerminal, Write, stdout};
 
 // ---------- ANSI 颜色 ----------
 pub const RESET: &str = "\x1b[0m";
@@ -129,23 +129,80 @@ pub fn print_tool_result(result: &str) {
     println!("{DIM}─────────────────────────────{RESET}");
 }
 
-/// 流式命令执行完毕后的紧凑分隔（输出已实时流过）。
-pub fn print_tool_done() {
-    println!("\n{DIM}── 命令执行完毕 ──{RESET}");
+/// 通用方向键选择菜单（内联，不清屏）。返回选中项索引。
+/// 非 TTY 时返回 Err。prompt 可含 \n 多行。
+pub fn select_menu(prompt: &str, options: &[&str]) -> Result<usize> {
+    if !std::io::stdin().is_terminal() {
+        return Err(AgentError::Other("非交互模式，无法选择".into()));
+    }
+    let mut out = stdout();
+    enable_raw_mode().map_err(|e| AgentError::Other(format!("raw mode: {e}")))?;
+
+    let prompt_lines = prompt.lines().count();
+    let total_lines = prompt_lines + options.len() + 1;
+    let up = total_lines.saturating_sub(1);
+    let mut first_draw = true;
+    let mut idx = 0usize;
+
+    let result = loop {
+        if !first_draw {
+            let _ = write!(out, "\x1b[{up}A");
+        }
+        first_draw = false;
+
+        let mut buf = String::new();
+        for line in prompt.lines() {
+            buf.push_str(&format!("\r\x1b[K{line}\r\n"));
+        }
+        for (i, opt) in options.iter().enumerate() {
+            if i == idx {
+                buf.push_str(&format!("\r\x1b[K {GREEN}❯ {opt}{RESET}\r\n"));
+            } else {
+                buf.push_str(&format!("\r\x1b[K   {opt}\r\n"));
+            }
+        }
+        buf.push_str(&format!("\r\x1b[K {DIM}(↑/↓ 选择 · Enter 确认 · Esc 取消){RESET}"));
+
+        if write!(out, "{buf}").and_then(|_| out.flush()).is_err() {
+            break Err(AgentError::Other("输出失败".into()));
+        }
+
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
+                KeyCode::Up => idx = idx.saturating_sub(1),
+                KeyCode::Down => idx = (idx + 1).min(options.len() - 1),
+                KeyCode::Enter => break Ok(idx),
+                KeyCode::Char('1') if !options.is_empty() => break Ok(0),
+                KeyCode::Char('2') if options.len() >= 2 => break Ok(1),
+                KeyCode::Esc => break Err(AgentError::Other("已取消".into())),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(e) => break Err(AgentError::Other(format!("读取按键失败: {e}"))),
+        }
+    };
+
+    let _ = disable_raw_mode();
+    let _ = execute!(out, Show);
+    let _ = write!(out, "\r\n");
+    let _ = out.flush();
+    result
 }
 
-/// 命令执行确认。返回 true=允许。非 TTY 下安全默认拒绝（除非 /free）。
+/// 命令执行确认。返回 true=允许。
+/// 非 TTY 下安全默认拒绝（除非 /free）。
 pub fn confirm_command(cmd: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         println!("{DIM}[!] 命令未执行（非交互模式，未开启 /free）: {cmd}{RESET}");
         return Ok(false);
     }
-    print!("\n{RED}⚠ 即将执行命令:{RESET}\n  {CYAN}{cmd}{RESET}\n允许? [y/N] ");
-    let _ = stdout().flush();
-let mut line = String::new();
-std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
-    .map_err(|e| AgentError::Other(e.to_string()))?;
-    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    let prompt = format!("{RED}⚠ 即将执行命令:{RESET}\n  {CYAN}{cmd}{RESET}");
+    let options = ["Yes", "No"];
+    match select_menu(&prompt, &options) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Ok(false),
+    }
 }
 
 // ---------- 流式渲染（ratatui Viewport::Inline） ----------

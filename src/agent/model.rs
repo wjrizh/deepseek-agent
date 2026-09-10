@@ -16,6 +16,8 @@ pub struct ModelReply {
     pub content: String,
     /// 本轮回复的消息 id，用于下一轮 parent_message_id
     pub message_id: Option<i64>,
+    /// 会话标题（来自 SSE Title 事件，可能为空）
+    pub title: Option<String>,
 }
 
 #[async_trait]
@@ -51,9 +53,13 @@ impl Model for DeepSeekModel {
         on_delta: &mut (dyn for<'a> FnMut(DeltaKind, &'a str) + Send),
     ) -> Result<ModelReply> {
         let mut solver = self.solver.lock().await;
-        let (content, message_id) =
-            crate::api::chat::completion(&self.http, &mut solver, req, on_delta).await?;
-        Ok(ModelReply { content, message_id })
+let (content, message_id, title) =
+    crate::api::chat::completion(&self.http, &mut solver, req, on_delta).await?;
+Ok(ModelReply {
+    content,
+    message_id,
+    title,
+})
     }
 
     async fn new_session(&self) -> Result<String> {

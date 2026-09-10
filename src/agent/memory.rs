@@ -27,7 +27,9 @@ pub struct InMemory {
 
 impl InMemory {
     pub fn new() -> Self {
-        Self { messages: Vec::new() }
+        Self {
+            messages: Vec::new(),
+        }
     }
 }
 

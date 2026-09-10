@@ -3,6 +3,7 @@ pub mod memory;
 pub mod model;
 pub mod parser;
 pub mod prompt;
+pub mod session_store;
 pub mod tool;
 
 pub use core::Agent;

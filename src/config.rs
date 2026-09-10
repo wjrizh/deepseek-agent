@@ -14,10 +14,12 @@ pub struct Config {
     pub base_url: String,
     /// 请求超时（秒）
     pub timeout_secs: u64,
-    /// token 持久化文件路径
-    pub token_file: PathBuf,
-    /// PoW WASM 文件路径
-    pub pow_wasm: PathBuf,
+/// token 持久化文件路径
+pub token_file: PathBuf,
+/// 会话持久化文件路径
+pub session_file: PathBuf,
+/// PoW WASM 文件路径
+pub pow_wasm: PathBuf,
 }
 
 impl Default for Config {
@@ -26,8 +28,9 @@ impl Default for Config {
         Self {
             base_url: BASE_URL.to_string(),
             timeout_secs: 300,
-            token_file: home.join(".deepseek-agent").join("token.json"),
-            pow_wasm: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/wasm/sha3.wasm")),
+token_file: home.join(".deepseek-agent").join("token.json"),
+session_file: home.join(".deepseek-agent").join("session.json"),
+pow_wasm: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/wasm/sha3.wasm")),
         }
     }
 }
@@ -47,9 +50,12 @@ impl Config {
         if let Ok(p) = std::env::var("DS_TOKEN_FILE") {
             cfg.token_file = PathBuf::from(p);
         }
-        if let Ok(p) = std::env::var("DS_POW_WASM") {
-            cfg.pow_wasm = PathBuf::from(p);
-        }
+if let Ok(p) = std::env::var("DS_POW_WASM") {
+    cfg.pow_wasm = PathBuf::from(p);
+}
+if let Ok(p) = std::env::var("DS_SESSION_FILE") {
+    cfg.session_file = PathBuf::from(p);
+}
         Ok(cfg)
     }
 }

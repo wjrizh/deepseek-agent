@@ -36,11 +36,7 @@ impl Runtime {
     pub async fn new(cfg: &Config) -> Result<Self> {
         let mut tokens = auth::TokenProvider::new(&cfg.token_file);
         tokens.load_or_refresh(&cfg.base_url).await?;
-        let http = Arc::new(HttpClient::new(
-            &cfg.base_url,
-            cfg.timeout_secs,
-            tokens,
-        )?);
+        let http = Arc::new(HttpClient::new(&cfg.base_url, cfg.timeout_secs, tokens)?);
         let solver = Arc::new(Mutex::new(PowSolver::from_file(&cfg.pow_wasm)?));
         Ok(Self { http, solver })
     }

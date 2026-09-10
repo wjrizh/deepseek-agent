@@ -7,13 +7,12 @@ use crate::agent::memory::{InMemory, Memory, Message, Role};
 use crate::agent::model::{Model, ModelReply};
 use crate::agent::parser::{self, ParseOutcome};
 use crate::agent::prompt::{SYSTEM_PROMPT, TOOLS_SECTION};
+use crate::agent::session_store::{SessionRecord, SessionStore};
 use crate::agent::tool::{ExecuteCommand, ToolRegistry};
 use crate::api::types::CompletionReq;
 use crate::error::Result;
 use std::sync::Arc;
 
-/// 单个用户请求内允许的最大工具调用轮数（防死循环）。
-const MAX_TOOL_ROUNDS: usize = 12;
 /// 解析失败的最大重试次数。
 const MAX_MALFORMED_RETRIES: u32 = 2;
 
@@ -28,10 +27,18 @@ pub struct Agent {
     pending_files: Vec<String>,
     /// 是否开启思考模式（expert + thinking）
     thinking: bool,
+    /// 是否开启联网搜索
+    search: bool,
     /// 是否已注入系统提示词（仅首轮）
     prompt_sent: bool,
     /// /free 模式：自动批准所有命令
     free_mode: bool,
+    /// 会话持久化
+    store: SessionStore,
+    /// 是否是从持久化恢复的会话（避免重复覆盖）
+    restored: bool,
+    /// 是否禁用本地会话恢复（/new 时临时用）
+    force_new: bool,
 }
 
 impl Agent {
@@ -47,13 +54,34 @@ impl Agent {
             parent_message_id: None,
             pending_files: Vec::new(),
             thinking: false,
+            search: false,
             prompt_sent: false,
             free_mode: false,
+            store: SessionStore::default(),
+            restored: false,
+            force_new: false,
         }
+    }
+
+    pub fn with_session_store(mut self, store: SessionStore) -> Self {
+        self.store = store;
+        self
     }
 
     pub fn set_thinking(&mut self, on: bool) {
         self.thinking = on;
+    }
+
+    pub fn set_search(&mut self, on: bool) {
+        self.search = on;
+    }
+
+    pub fn thinking(&self) -> bool {
+        self.thinking
+    }
+
+    pub fn search(&self) -> bool {
+        self.search
     }
 
     /// 切换 /free 模式（自动批准所有命令）。
@@ -81,16 +109,76 @@ impl Agent {
         self.pending_files.push(file_id.into());
     }
 
-    /// 确保会话存在
+    /// 确保会话存在：优先恢复持久化会话，否则新建。
     pub async fn ensure_session(&mut self) -> Result<&str> {
         if self.session_id.is_none() {
-            self.session_id = Some(self.model.new_session().await?);
+            if !self.force_new
+                && let Some(rec) = self.store.active_record()
+            {
+                self.session_id = Some(rec.session_id.clone());
+                self.parent_message_id = rec.parent_message_id;
+                self.restored = true;
+                let tag = rec.title.as_deref().unwrap_or("(无标题)");
+                eprintln!(
+                    "[session] 已恢复会话 {} · parent={:?} · {tag}",
+                    &rec.session_id[..rec.session_id.len().min(8)],
+                    rec.parent_message_id
+                );
+            } else {
+                let id = self.model.new_session().await?;
+                let rec = SessionRecord::new(id.clone());
+                self.store.upsert_active(rec)?;
+                self.session_id = Some(id);
+            }
         }
         Ok(self.session_id.as_ref().unwrap())
     }
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub async fn new_session(&mut self) -> Result<String> {
+        self.memory.clear();
+        self.prompt_sent = false;
+        self.session_id = None;
+        self.parent_message_id = None;
+        self.force_new = true;
+        let id = self.model.new_session().await?;
+        self.force_new = false;
+        let rec = SessionRecord::new(id.clone());
+        self.store.upsert_active(rec)?;
+        self.session_id = Some(id.clone());
+        Ok(id)
+    }
+
+    pub fn switch_session(
+        &mut self,
+        session_id: String,
+        parent: Option<i64>,
+    ) -> Result<()> {
+        self.memory.clear();
+        self.prompt_sent = false;
+        let mut rec = SessionRecord::new(session_id.clone());
+        rec.parent_message_id = parent;
+        self.store.activate(rec)?;
+        self.session_id = Some(session_id);
+        self.parent_message_id = parent;
+        self.force_new = false;
+        self.restored = false;
+        Ok(())
+    }
+
+    pub fn store_contains(&self, sid: &str) -> bool {
+        self.store.contains(sid)
+    }
+
+    pub fn store_parent_of(&self, sid: &str) -> Option<i64> {
+        self.store.parent_of(sid)
+    }
+
+    pub fn store_remove(&mut self, sid: &str) -> Result<()> {
+        self.store.remove(sid)
     }
 
     /// 主入口：发一轮消息（含工具循环）。
@@ -111,19 +199,18 @@ impl Agent {
             input.to_string()
         };
 
-        let mut tool_rounds = 0usize;
         let mut malformed_retries = 0u32;
 
         loop {
             // 3. 构造请求
-            let mut req =
-                CompletionReq::new(self.session_id.clone().unwrap(), next_prompt.clone());
+            let mut req = CompletionReq::new(self.session_id.clone().unwrap(), next_prompt.clone());
             req.parent_message_id = self.parent_message_id;
             req.ref_file_ids = std::mem::take(&mut self.pending_files);
             if self.thinking {
                 req.model_type = "expert".into();
                 req.thinking_enabled = true;
             }
+            req.search_enabled = self.search;
 
             // 4. 调模型（流式）
             let mut ui = crate::ui::AnyUi::new();
@@ -136,8 +223,15 @@ impl Agent {
             ui.finish();
             self.parent_message_id = reply.message_id;
 
-// 5. 解析输出
-match parser::parse(&reply.content) {
+            if let Some(sid) = self.session_id.clone() {
+                let _ = self.store.update_parent(&sid, reply.message_id);
+                if let Some(t) = &reply.title {
+                    let _ = self.store.update_title(&sid, t);
+                }
+            }
+
+            // 5. 解析输出
+            match parser::parse(&reply.content) {
                 ParseOutcome::Text(_) => {
                     self.memory.push(Message {
                         role: Role::Assistant,
@@ -147,25 +241,14 @@ match parser::parse(&reply.content) {
                 }
                 ParseOutcome::Call(call) => {
                     malformed_retries = 0;
-                    tool_rounds += 1;
                     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-                    let result = self.run_tool(&call, tty).await;
-                    if tty {
-                        crate::ui::print_tool_done();
-                    } else {
+                    // 仅 /free 模式下允许 PTY 抢 stdin 做交互，避免与审批输入冲突
+                    let live = tty && self.free_mode;
+                    let result = self.run_tool(&call, live).await;
+                    if !tty {
                         crate::ui::print_tool_result(&result);
                     }
                     next_prompt = format!("<tool_result>\n{result}\n</tool_result>");
-
-                    if tool_rounds >= MAX_TOOL_ROUNDS {
-                        let msg = "[已达工具调用轮数上限，停止]";
-                        crate::ui::print_tool_result(msg);
-                        self.memory.push(Message {
-                            role: Role::Assistant,
-                            content: reply.content.clone(),
-                        });
-                        return Ok(reply);
-                    }
                 }
                 ParseOutcome::Malformed { raw, reason } => {
                     malformed_retries += 1;
