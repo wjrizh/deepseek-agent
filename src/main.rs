@@ -26,12 +26,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = ctrlc::set_handler(|| {
-        if deepseek_agent::agent::tool::TOOL_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
-            deepseek_agent::agent::tool::TOOL_INTERRUPT
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
+        use std::sync::atomic::Ordering;
+        if !deepseek_agent::agent::tool::TOOL_RUNNING.load(Ordering::Relaxed)
+            || deepseek_agent::agent::tool::TOOL_INTERRUPT.load(Ordering::Relaxed)
+        {
+            let _ = crossterm::terminal::disable_raw_mode();
             std::process::exit(130);
         }
+        deepseek_agent::agent::tool::TOOL_INTERRUPT.store(true, Ordering::Relaxed);
     });
 
     let args = Args::parse();

@@ -11,6 +11,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use std::io::{IsTerminal, Write, stdout};
+use std::sync::atomic::Ordering;
 
 // ---------- ANSI 颜色 ----------
 pub const RESET: &str = "\x1b[0m";
@@ -137,44 +138,65 @@ pub fn select_menu(prompt: &str, options: &[&str]) -> Result<usize> {
     }
     let mut out = stdout();
     enable_raw_mode().map_err(|e| AgentError::Other(format!("raw mode: {e}")))?;
-
     let prompt_lines = prompt.lines().count();
     let total_lines = prompt_lines + options.len() + 1;
     let up = total_lines.saturating_sub(1);
-    let mut first_draw = true;
     let mut idx = 0usize;
+    let mut first_draw = true;
+    let mut dirty = true;
 
     let result = loop {
-        if !first_draw {
-            let _ = write!(out, "\x1b[{up}A");
-        }
-        first_draw = false;
-
-        let mut buf = String::new();
-        for line in prompt.lines() {
-            buf.push_str(&format!("\r\x1b[K{line}\r\n"));
-        }
-        for (i, opt) in options.iter().enumerate() {
-            if i == idx {
-                buf.push_str(&format!("\r\x1b[K {GREEN}❯ {opt}{RESET}\r\n"));
-            } else {
-                buf.push_str(&format!("\r\x1b[K   {opt}\r\n"));
+        if dirty {
+            if !first_draw {
+                let _ = write!(out, "\x1b[{up}A");
             }
+            first_draw = false;
+            let mut buf = String::new();
+            for line in prompt.lines() {
+                buf.push_str(&format!("\r\x1b[K{line}\r\n"));
+            }
+            for (i, opt) in options.iter().enumerate() {
+                if i == idx {
+                    buf.push_str(&format!("\r\x1b[K {GREEN}❯ {opt}{RESET}\r\n"));
+                } else {
+                    buf.push_str(&format!("\r\x1b[K   {opt}\r\n"));
+                }
+            }
+            buf.push_str(&format!(
+                "\r\x1b[K {DIM}(↑/↓ 选择 · Enter 确认 · Esc 取消){RESET}"
+            ));
+            if write!(out, "{buf}").and_then(|_| out.flush()).is_err() {
+                break Err(AgentError::Other("输出失败".into()));
+            }
+            dirty = false;
         }
-        buf.push_str(&format!("\r\x1b[K {DIM}(↑/↓ 选择 · Enter 确认 · Esc 取消){RESET}"));
 
-        if write!(out, "{buf}").and_then(|_| out.flush()).is_err() {
-            break Err(AgentError::Other("输出失败".into()));
+        if !crossterm::event::poll(std::time::Duration::from_millis(200)).unwrap_or(false) {
+            if crate::agent::tool::TOOL_INTERRUPT.load(Ordering::Relaxed) {
+                break Err(AgentError::Other("已中断".into()));
+            }
+            continue;
         }
 
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
-                KeyCode::Up => idx = idx.saturating_sub(1),
-                KeyCode::Down => idx = (idx + 1).min(options.len() - 1),
+                KeyCode::Up => {
+                    idx = idx.saturating_sub(1);
+                    dirty = true;
+                }
+                KeyCode::Down => {
+                    idx = (idx + 1).min(options.len() - 1);
+                    dirty = true;
+                }
                 KeyCode::Enter => break Ok(idx),
                 KeyCode::Char('1') if !options.is_empty() => break Ok(0),
                 KeyCode::Char('2') if options.len() >= 2 => break Ok(1),
                 KeyCode::Esc => break Err(AgentError::Other("已取消".into())),
+                KeyCode::Char('c')
+                    if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    break Err(AgentError::Other("已中断".into()));
+                }
                 _ => {}
             },
             Ok(_) => {}

@@ -272,7 +272,7 @@ if reply.message_id.is_some() {
                 ParseOutcome::Call(call) => {
                     malformed_retries = 0;
                     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-                    let live = tty && self.free_mode;
+                    let live = tty;
                     let result = self.run_tool(&call, live).await;
                     if result.starts_with("[INTERRUPTED]") {
                         if tty {
