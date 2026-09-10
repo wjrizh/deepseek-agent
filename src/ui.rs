@@ -348,6 +348,153 @@ impl Default for TagFilter {
     }
 }
 
+/// 流式语法着色器：跨块状态机。
+/// - 代码块（``` 围栏）→ 青色
+/// - 日期 YYYY-MM-DD / 时间 HH:MM(:SS) → 暗青
+///
+/// 跨块安全：尾部可能是不完整日期/围栏时缓冲，下块续判。
+struct Painter {
+    in_code: bool,
+    hold: String,
+    code_color: &'static str,
+    date_color: &'static str,
+    reset: &'static str,
+}
+
+impl Painter {
+    fn new() -> Self {
+        Self {
+            in_code: false,
+            hold: String::new(),
+            code_color: "\x1b[36m",
+            date_color: "\x1b[2;36m",
+            reset: "\x1b[0m",
+        }
+    }
+
+    fn feed(&mut self, text: &str) -> String {
+        let mut data = std::mem::take(&mut self.hold);
+        data.push_str(text);
+        let mut out = String::new();
+        let mut i = 0usize;
+
+        while i < data.len() {
+            if data[i..].starts_with("```") {
+                if self.in_code {
+                    out.push_str(self.reset);
+                    self.in_code = false;
+                } else {
+                    out.push_str(self.code_color);
+                    self.in_code = true;
+                }
+                i += 3;
+                while i < data.len() && data.as_bytes()[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+
+            if i + 3 > data.len() {
+                let tail = &data[i..];
+                if "```".starts_with(tail) {
+                    self.hold = tail.to_string();
+                    break;
+                }
+            }
+
+            let ch = data[i..].chars().next().unwrap();
+            let ch_len = ch.len_utf8();
+
+            if self.in_code {
+                out.push(ch);
+                i += ch_len;
+                continue;
+            }
+
+            if let Some((matched, consumed)) = self.try_match_datetime(&data[i..]) {
+                out.push_str(self.date_color);
+                out.push_str(&matched);
+                out.push_str(self.reset);
+                i += consumed;
+                continue;
+            }
+
+            if let Some(tail) = self.partial_datetime_tail(&data[i..]) {
+                self.hold = tail;
+                break;
+            }
+
+            out.push(ch);
+            i += ch_len;
+        }
+
+        if self.in_code && i >= data.len() {
+            out.push_str(self.code_color);
+        }
+        out
+    }
+
+    fn try_match_datetime(&self, s: &str) -> Option<(String, usize)> {
+        let b = s.as_bytes();
+        if b.len() >= 10
+            && b[0..4].iter().all(|c| c.is_ascii_digit())
+            && b[4] == b'-'
+            && b[5..7].iter().all(|c| c.is_ascii_digit())
+            && b[7] == b'-'
+            && b[8..10].iter().all(|c| c.is_ascii_digit())
+        {
+            return Some((s[..10].to_string(), 10));
+        }
+        if b.len() >= 5
+            && b[0..2].iter().all(|c| c.is_ascii_digit())
+            && b[2] == b':'
+            && b[3..5].iter().all(|c| c.is_ascii_digit())
+        {
+            let mut len = 5;
+            if b.len() >= 8 && b[5] == b':' && b[6..8].iter().all(|c| c.is_ascii_digit()) {
+                len = 8;
+            }
+            return Some((s[..len].to_string(), len));
+        }
+        None
+    }
+
+    fn partial_datetime_tail(&self, s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let n = b.len();
+        let is_dateish = !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ':')
+            && n < 10;
+        if is_dateish {
+            let likely_date = s.contains('-') && s.chars().take_while(|c| c.is_ascii_digit()).count() >= 2;
+            let likely_time = s.contains(':');
+            if likely_date || likely_time {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    fn finish(&mut self) -> String {
+        let mut out = String::new();
+        let tail = std::mem::take(&mut self.hold);
+        if !tail.is_empty() {
+            out.push_str(&tail);
+        }
+        if self.in_code {
+            out.push_str(self.reset);
+            self.in_code = false;
+        }
+        out
+    }
+}
+
+impl Default for Painter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 活区渲染器：思考在 ratatui Viewport::Inline 活区（暗灰），
 /// 答案首字到达时**释放活区**，回归普通 print! 流式输出。
 pub struct LiveUi {
@@ -358,6 +505,7 @@ pub struct LiveUi {
     viewport_top: Option<u16>,
     collapse: LineCollapser,
     filter: TagFilter,
+    painter: Painter,
     prefix_printed: bool,
 }
 
@@ -379,6 +527,7 @@ impl LiveUi {
             viewport_top: None,
             collapse: LineCollapser::default(),
             filter: TagFilter::new(),
+            painter: Painter::new(),
             prefix_printed: false,
         };
         let _ = ui.draw_thinking();
@@ -400,7 +549,8 @@ impl LiveUi {
                     self.end_thinking();
                 }
                 let filtered = self.filter.feed(text);
-                let out = self.collapse.feed(&filtered);
+                let painted = self.painter.feed(&filtered);
+                let out = self.collapse.feed(&painted);
                 if !out.is_empty() {
                     if !self.prefix_printed {
                         self.prefix_printed = true;
@@ -457,7 +607,9 @@ impl LiveUi {
     pub fn finish(&mut self) {
         if self.answer_started {
             let f = self.filter.finish();
-            let mut tail = self.collapse.feed(&f);
+            let mut p = self.painter.feed(&f);
+            p.push_str(&self.painter.finish());
+            let mut tail = self.collapse.feed(&p);
             tail.push_str(&self.collapse.finish());
             if !tail.is_empty() {
                 if !self.prefix_printed {
@@ -481,6 +633,7 @@ pub struct PlainUi {
     answer_started: bool,
     collapse: LineCollapser,
     filter: TagFilter,
+    painter: Painter,
     prefix_printed: bool,
 }
 
@@ -490,6 +643,7 @@ impl PlainUi {
             answer_started: false,
             collapse: LineCollapser::default(),
             filter: TagFilter::new(),
+            painter: Painter::new(),
             prefix_printed: false,
         }
     }
@@ -502,7 +656,8 @@ impl PlainUi {
                     self.answer_started = true;
                 }
                 let filtered = self.filter.feed(text);
-                let out = self.collapse.feed(&filtered);
+                let painted = self.painter.feed(&filtered);
+                let out = self.collapse.feed(&painted);
                 if !out.is_empty() {
                     if !self.prefix_printed {
                         self.prefix_printed = true;
@@ -518,7 +673,9 @@ impl PlainUi {
     pub fn finish(&mut self) {
         if self.answer_started {
             let f = self.filter.finish();
-            let mut tail = self.collapse.feed(&f);
+            let mut p = self.painter.feed(&f);
+            p.push_str(&self.painter.finish());
+            let mut tail = self.collapse.feed(&p);
             tail.push_str(&self.collapse.finish());
             if !tail.is_empty() {
                 if !self.prefix_printed {
