@@ -196,7 +196,8 @@ impl Tool for ExecuteCommand {
         // heredoc（含 `<<`）：即使 live 也不转发用户 stdin。
         // 否则键盘输入会被 heredoc 消费命令的 stdin 吞掉，导致解释器进 REPL。
         let has_heredoc = cmd.contains("<<");
-        let stdin_thread = if live && !has_heredoc {
+        let reads_stdin = reads_whole_stdin(cmd);
+        let stdin_thread = if live && !has_heredoc && !reads_stdin {
             Some(spawn_stdin_forwarder(writer, stop.clone()))
         } else {
             drop(writer);
@@ -266,6 +267,29 @@ impl Tool for ExecuteCommand {
         }
         Ok(format_result(0, &clean))
     }
+}
+
+fn reads_whole_stdin(cmd: &str) -> bool {
+    let last = cmd
+        .rsplit(['\n', ';', '&', '|'])
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+    let mut parts = last.split_whitespace();
+    let prog = parts.next().unwrap_or("");
+    let args: Vec<&str> = parts.collect();
+
+    let base = prog.rsplit('/').next().unwrap_or(prog);
+    if base == "python" || base == "python3" || base.starts_with("python3.") {
+        if args == ["-"] {
+            return true;
+        }
+    }
+    if (base == "cat" || base == "read" || base == "tee") && args.is_empty() {
+        return true;
+    }
+    false
 }
 
 fn spawn_stdin_forwarder(
@@ -454,15 +478,15 @@ impl Tool for UploadFile {
                 lines.push(format!("[!] 文件不存在: {p}"));
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(path) {
-                if meta.len() > crate::api::file::MAX_FILE_SIZE {
-                    lines.push(format!(
-                        "[!] 文件过大（{} 字节，上限 {} 字节），不能直接上传: {p}",
-                        meta.len(),
-                        crate::api::file::MAX_FILE_SIZE
-                    ));
-                    continue;
-                }
+            if let Ok(meta) = std::fs::metadata(path)
+                && meta.len() > crate::api::file::MAX_FILE_SIZE
+            {
+                lines.push(format!(
+                    "[!] 文件过大（{} 字节，上限 {} 字节），不能直接上传: {p}",
+                    meta.len(),
+                    crate::api::file::MAX_FILE_SIZE
+                ));
+                continue;
             }
             let mut solver = self.solver.lock().await;
             let r = crate::api::file::upload(&self.http, &mut solver, path).await;

@@ -180,6 +180,13 @@ impl Hinter for AgentCompleter {
 impl Highlighter for AgentCompleter {}
 impl Validator for AgentCompleter {}
 
+
+/// 提交给模型前的随机延迟（0-2 秒），防止误触。命令不走此路径。
+async fn random_send_delay() {
+    let ms = rand::random_range(0..=2000u64);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
 pub async fn run(
     cfg: Config,
     once: Option<String>,
@@ -694,6 +701,7 @@ pub async fn run(
                 if final_input.is_empty() {
                     continue;
                 }
+                random_send_delay().await;
                 if let Err(e) = agent.run(&final_input).await {
                     eprintln!("{}[!] 出错: {}{}", ui::RED, e, ui::RESET);
                 }
