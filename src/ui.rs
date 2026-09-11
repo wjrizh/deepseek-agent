@@ -161,7 +161,7 @@ pub fn send_delay_bar(total_ms: u64, cancel: &tokio_util::sync::CancellationToke
     const PHRASES: [&str; 5] = [
         "正在连接 DeepSeek",
         "正在唤醒模型",
-        "模型思考中",
+        "模型拉屎中",
         "正在组织语言",
         "马上就好",
     ];
