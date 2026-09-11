@@ -43,6 +43,7 @@ fn now_secs() -> u64 {
 #[derive(Debug, Clone)]
 pub struct TokenProvider {
     file: std::path::PathBuf,
+    profile_dir: Option<std::path::PathBuf>,
     current: Option<TokenRecord>,
 }
 
@@ -50,6 +51,18 @@ impl TokenProvider {
     pub fn new(file: impl AsRef<Path>) -> Self {
         Self {
             file: file.as_ref().to_path_buf(),
+            profile_dir: None,
+            current: None,
+        }
+    }
+
+    pub fn with_profile(
+        file: impl AsRef<Path>,
+        profile: impl AsRef<Path>,
+    ) -> Self {
+        Self {
+            file: file.as_ref().to_path_buf(),
+            profile_dir: Some(profile.as_ref().to_path_buf()),
             current: None,
         }
     }
@@ -75,7 +88,7 @@ impl TokenProvider {
         }
 
         // 3. 浏览器提取
-        if let Ok(t) = extract_from_browser() {
+        if let Ok(t) = extract_from_browser(self.profile_dir.as_deref()) {
             let rec = TokenRecord::new(t.clone(), "browser");
             self.current = Some(rec.clone());
             let _ = self.save(&rec);
@@ -106,7 +119,7 @@ impl TokenProvider {
             eprintln!("[auth] 缓存 token 已失效，尝试从浏览器重新提取...");
         }
 
-        match extract_from_browser() {
+        match extract_from_browser(self.profile_dir.as_deref()) {
             Ok(t) => {
                 let rec = TokenRecord::new(t.clone(), "browser");
                 self.current = Some(rec.clone());
@@ -140,10 +153,10 @@ impl TokenProvider {
             Ok(t) => t,
             Err(_) => return false,
         };
-        let client = reqwest::Client::builder()
+        let client = wreq::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|_| wreq::Client::new());
         let resp = client
             .post(format!("{base_url}/api/v0/chat/create_pow_challenge"))
             .header("authorization", format!("Bearer {token}"))
@@ -162,8 +175,8 @@ impl TokenProvider {
         }
     }
 
-    pub fn refresh_from_browser(&mut self) -> Result<()> {
-        let t = extract_from_browser()?;
+    pub fn refresh_from_browser(&mut self, profile_dir: Option<&Path>) -> Result<()> {
+        let t = extract_from_browser(profile_dir)?;
         self.update(t, "browser")
     }
 
@@ -189,11 +202,38 @@ impl TokenProvider {
     }
 }
 
+fn pick_python() -> Result<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(p) = std::env::var("DEEPSEEK_PYTHON")
+        && !p.trim().is_empty() {
+            candidates.push(p.trim().to_string());
+        }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/.ligong_venv/bin/python3"));
+    }
+    candidates.push("python3".to_string());
+    candidates.push("python".to_string());
+
+    for cand in candidates {
+        let ok = std::process::Command::new(&cand)
+            .args(["-c", "import playwright"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(ok, Ok(s) if s.success()) {
+            return Ok(cand);
+        }
+    }
+    Err(AgentError::Auth(
+        "未找到带 Playwright 的 Python 解释器。请安装或设置 DEEPSEEK_PYTHON".into(),
+    ))
+}
+
 /// 从浏览器 localStorage 提取 userToken。
 ///
-/// 通过调用本地提取脚本（`scripts/extract_token.py`，基于 Playwright），
-/// 复用已登录的浏览器会话。若脚本不存在则返回错误。
-pub fn extract_from_browser() -> Result<String> {
+/// `profile_dir` 为 None 时用默认 profile（单账号兼容）。
+/// 传入账号专属目录可实现多账号登录态隔离。
+pub fn extract_from_browser(profile_dir: Option<&Path>) -> Result<String> {
     let script = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/scripts/extract_token.py"
@@ -201,8 +241,13 @@ pub fn extract_from_browser() -> Result<String> {
     if !script.exists() {
         return Err(AgentError::Auth("浏览器提取脚本不存在".into()));
     }
-    let out = std::process::Command::new("python3")
-        .arg(script)
+    let py = pick_python()?;
+    let mut cmd = std::process::Command::new(&py);
+    cmd.arg(script);
+    if let Some(dir) = profile_dir {
+        cmd.arg("--profile").arg(dir);
+    }
+    let out = cmd
         .output()
         .map_err(|e| AgentError::Auth(format!("调用提取脚本失败: {e}")))?;
     if !out.status.success() {

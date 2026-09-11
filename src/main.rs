@@ -21,29 +21,68 @@ struct Args {
     /// 开启思考模式（显示推理过程）
     #[arg(long)]
     thinking: bool,
+
+    /// 指定账号（覆盖默认）
+    #[arg(long)]
+    account: Option<String>,
+
+    /// 新增账号（交互式登录后保存）
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    add_account: Option<String>,
+
+    /// 删除账号
+    #[arg(long)]
+    del_account: Option<String>,
+
+    /// 列出账号
+    #[arg(long)]
+    list_accounts: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = ctrlc::set_handler(|| {
-        use std::sync::atomic::Ordering;
-        if !deepseek_agent::agent::tool::TOOL_RUNNING.load(Ordering::Relaxed)
-            || deepseek_agent::agent::tool::TOOL_INTERRUPT.load(Ordering::Relaxed)
-        {
-            let _ = crossterm::terminal::disable_raw_mode();
-            std::process::exit(130);
-        }
-        deepseek_agent::agent::tool::TOOL_INTERRUPT.store(true, Ordering::Relaxed);
-    });
-
     let args = Args::parse();
 
     if let Some(t) = &args.token {
-        // SAFETY: 单线程启动阶段设置环境变量
         unsafe { std::env::set_var("DS_TOKEN", t) };
     }
 
-    let cfg = Config::from_env()?;
+    // 账号子命令优先
+    if let Some(name) = &args.del_account {
+        let mut mgr = deepseek_agent::accounts::AccountManager::load_default()?;
+        mgr.remove(name)?;
+        println!("已删除账号: {name}");
+        return Ok(());
+    }
+    if args.list_accounts {
+        let mgr = deepseek_agent::accounts::AccountManager::load_default()?;
+        let def = mgr.default_account();
+        for a in mgr.list() {
+            let mark = if Some(&a.name) == def.as_ref() { "●" } else { " " };
+            println!("{mark} {}", a.name);
+        }
+        return Ok(());
+    }
+    if let Some(name) = &args.add_account {
+        deepseek_agent::cli::add_account_interactive(name).await?;
+        return Ok(());
+    }
+
+    // 决定用哪个账号：--account > last_account > 交互选择
+    let cfg = if let Some(name) = &args.account {
+        Config::for_account(name)?
+    } else {
+        let mgr = deepseek_agent::accounts::AccountManager::load_default()?;
+        if mgr.list().is_empty() {
+            Config::from_env()?
+        } else {
+            let name = mgr
+                .default_account()
+                .or_else(|| mgr.list().first().map(|a| a.name.clone()))
+                .unwrap();
+            Config::for_account(&name)?
+        }
+    };
     cli::run(cfg, args.prompt, args.files, args.thinking).await?;
     Ok(())
 }

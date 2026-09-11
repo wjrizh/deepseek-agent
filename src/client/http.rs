@@ -1,10 +1,11 @@
 //! HTTP 客户端封装 + 统一鉴权头。
 
 use crate::auth::TokenProvider;
-use crate::config::{CLIENT_BUNDLE_ID, CLIENT_VERSION};
+use crate::config::{APP_VERSION, BROWSER_UA, CLIENT_BUNDLE_ID, CLIENT_VERSION};
 use crate::error::{AgentError, Result};
-use reqwest::Client;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use wreq::Client;
+use wreq::header::{HeaderMap, HeaderName, HeaderValue};
+use wreq_util::Emulation;
 
 pub struct HttpClient {
     client: Client,
@@ -19,6 +20,7 @@ impl HttpClient {
         tokens: TokenProvider,
     ) -> Result<Self> {
         let client = Client::builder()
+            .emulation(Emulation::Chrome133)
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()?;
         Ok(Self {
@@ -54,15 +56,23 @@ impl HttpClient {
         set("x-client-bundle-id", CLIENT_BUNDLE_ID);
         set("x-client-version", CLIENT_VERSION);
         set("x-client-platform", "web");
-        set("x-client-locale", "zh_CN");
+        set("x-client-locale", "zh-CN");
         set("x-model-type", "default");
         set("x-thinking-enabled", "0");
         set("x-client-timezone-offset", "28800");
-        set(
-            "user-agent",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        );
+        set("x-app-version", APP_VERSION);
+        // --- 浏览器特征头（降低被识别为纯 API 客户端的概率） ---
+        set("accept", "*/*");
+        set("accept-language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7");
+        set("pragma", "no-cache");
+        set("priority", "u=1, i");
+        set("sec-ch-ua", "\"Chromium\";v=\"133\", \"Google Chrome\";v=\"133\", \"Not?A_Brand\";v=\"99\"");
+        set("sec-ch-ua-mobile", "?0");
+        set("sec-ch-ua-platform", "\"Windows\"");
+        set("sec-fetch-dest", "empty");
+        set("sec-fetch-mode", "cors");
+        set("sec-fetch-site", "same-origin");
+        set("user-agent", BROWSER_UA);
         set("origin", &self.base_url);
         set("referer", &format!("{}/", self.base_url));
         Ok(h)

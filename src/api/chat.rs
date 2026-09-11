@@ -5,6 +5,7 @@ use crate::client::http::HttpClient;
 use crate::client::pow::PowSolver;
 use crate::client::sse;
 use crate::error::{AgentError, Result};
+use serde_json::Value;
 use futures_util::StreamExt;
 
 pub const PATH_SESSION_CREATE: &str = "/api/v0/chat_session/create";
@@ -92,7 +93,10 @@ while let Some(chunk) = stream.next().await {
             if let Some(json_str) = line.strip_prefix("data:") {
                 let json_str = json_str.trim();
                 if json_str == "[DONE]" {
-                    return Ok((full, resp_id, title));
+                    return finish_completion(full, resp_id, title);
+                }
+                if let Some(err) = biz_error(json_str) {
+                    return Err(err);
                 }
                 match parser.parse_line(json_str) {
                     Some(ChatEvent::Ready {
@@ -111,16 +115,31 @@ while let Some(chunk) = stream.next().await {
                     }
                     _ => {}
                 }
-            } else if let Some(ev) = line.strip_prefix("event:")
-                && sse::is_close_event(ev.trim())
-            {
-                return Ok((full, resp_id, title));
+            } else if let Some(ev) = line.strip_prefix("event:") {
+                let ev = ev.trim();
+                if sse::is_close_event(ev) {
+                    return finish_completion(full, resp_id, title);
+                }
+                if ev == "error" {
+                    return Err(AgentError::Api { code: -1, msg: full });
+                }
+            } else if line.starts_with('{') {
+                // 裸 JSON（非 SSE data: 行）：DeepSeek 业务错误常以此返回，
+                // 例如 {"code":0,"data":{"biz_code":5,"biz_msg":"user is muted"}}。
+                if let Some(err) = biz_error(&line) {
+                    return Err(err);
+                }
             }
         }
     }
 
     if !buf.trim().is_empty() {
         let line = buf.trim();
+        if line.starts_with('{')
+            && let Some(err) = biz_error(line)
+        {
+            return Err(err);
+        }
         if let Some(json_str) = line.strip_prefix("data:") {
             let json_str = json_str.trim();
             if json_str != "[DONE]" {
@@ -145,6 +164,44 @@ while let Some(chunk) = stream.next().await {
         }
     }
 
+    finish_completion(full, resp_id, title)
+}
+/// 检测响应 JSON 中的业务错误：顶层 code != 0，或 data.biz_code != 0
+/// （如 biz_code=5  user is muted）。命中返回 AgentError::Api，否则 None。
+fn biz_error(json_str: &str) -> Option<AgentError> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    if let Some(code) = v.get("code").and_then(|c| c.as_i64())
+        && code != 0
+    {
+        return Some(AgentError::Api {
+            code,
+            msg: v.get("msg").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+        });
+    }
+    let data = v.get("data")?;
+    let biz_code = data.get("biz_code").and_then(|c| c.as_i64()).unwrap_or(0);
+    if biz_code != 0 {
+        return Some(AgentError::Api {
+            code: biz_code,
+            msg: data
+                .get("biz_msg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+    None
+}
+
+/// 正常结束：正文为空则视为空回复（疑似限流），返回 Err 供上层重试。
+fn finish_completion(
+    full: String,
+    resp_id: Option<i64>,
+    title: Option<String>,
+) -> Result<(String, Option<i64>, Option<String>)> {
+    if full.trim().is_empty() {
+        return Err(AgentError::EmptyReply);
+    }
     Ok((full, resp_id, title))
 }
 

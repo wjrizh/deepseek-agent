@@ -38,6 +38,10 @@ pub trait Model: Send + Sync {
     async fn sync_parent(&self, _session_id: &str, _local: Option<i64>) -> Result<Option<i64>> {
         Ok(None)
     }
+
+    async fn message_count(&self, _session_id: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
 }
 
 /// DeepSeek 后端实现
@@ -78,5 +82,9 @@ Ok(ModelReply {
             Ok(server_mid) => Ok(server_mid),
             Err(_) => Ok(None),
         }
+    }
+
+    async fn message_count(&self, session_id: &str) -> Result<Option<i64>> {
+        crate::api::chat::latest_message_id(&self.http, session_id).await
     }
 }

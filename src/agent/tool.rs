@@ -172,7 +172,8 @@ impl Tool for ExecuteCommand {
 
         let captured = Arc::new(Mutex::new(String::new()));
         let captured_thread = captured.clone();
-        let (tx, mut rx) = mpsc::channel::<String>(64);
+        let (tx, mut rx) = mpsc::channel::<String>(256);
+
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
@@ -183,21 +184,20 @@ impl Tool for ExecuteCommand {
                         if let Ok(mut c) = captured_thread.lock() {
                             c.push_str(&s);
                         }
-                        if tx.blocking_send(s).is_err() {
+                        if tx.is_closed() {
                             break;
                         }
+                        let _ = tx.try_send(s);
                     }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
         });
 
         let stop = Arc::new(AtomicBool::new(false));
-        // heredoc（含 `<<`）：即使 live 也不转发用户 stdin。
-        // 否则键盘输入会被 heredoc 消费命令的 stdin 吞掉，导致解释器进 REPL。
-        let has_heredoc = cmd.contains("<<");
         let reads_stdin = reads_whole_stdin(cmd);
-        let stdin_thread = if live && !has_heredoc && !reads_stdin {
+        let stdin_thread = if live && !reads_stdin {
             Some(spawn_stdin_forwarder(writer, stop.clone()))
         } else {
             drop(writer);
@@ -215,15 +215,48 @@ impl Tool for ExecuteCommand {
         let mut timed_out = false;
         let mut interrupted = false;
         let mut idle = Duration::ZERO;
-        let tick = Duration::from_millis(200);
+        let tick = Duration::from_millis(100);
+        let mut child_exited = false;
+
         loop {
             if TOOL_INTERRUPT.load(Ordering::Relaxed) {
                 interrupted = true;
                 break;
             }
-            match tokio::time::timeout(tick, rx.recv()).await {
-                Ok(Some(chunk)) => {
-                    idle = Duration::ZERO;
+
+            let mut got_output = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(chunk) => {
+                        got_output = true;
+                        if tty && !live {
+                            print!("{chunk}");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        } else {
+                            on_output(&chunk);
+                        }
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        child_exited = true;
+                        break;
+                    }
+                }
+            }
+
+            if got_output {
+                idle = Duration::ZERO;
+            } else {
+                idle += tick;
+            }
+
+            if !child_exited
+                && let Ok(Some(_)) = child.try_wait()
+            {
+                child_exited = true;
+            }
+            if child_exited {
+                while let Ok(chunk) = rx.try_recv() {
                     if tty && !live {
                         print!("{chunk}");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -231,28 +264,29 @@ impl Tool for ExecuteCommand {
                         on_output(&chunk);
                     }
                 }
-                Ok(None) => break,
-                Err(_) => {
-                    idle += tick;
-                    if idle >= Duration::from_secs(timeout_secs) {
-                        timed_out = true;
-                        break;
-                    }
-                }
+                break;
             }
+
+            if idle >= Duration::from_secs(timeout_secs) {
+                timed_out = true;
+                break;
+            }
+
+            tokio::time::sleep(tick).await;
         }
 
         stop.store(true, Ordering::Relaxed);
         let _ = child.kill();
         let _ = child.wait();
+        drop(pair.master);
         let _ = reader_handle.join();
         if let Some(t) = stdin_thread {
             let _ = t.join();
         }
 
         let captured = captured.lock().map(|c| c.clone()).unwrap_or_default();
-
         let clean = strip_ansi(&collapse_progress(&captured));
+
         if interrupted {
             return Ok(format!(
                 "[INTERRUPTED]\nexit_code: -1\n[中断] 命令被 Ctrl+C 终止\n{}",
@@ -281,11 +315,10 @@ fn reads_whole_stdin(cmd: &str) -> bool {
     let args: Vec<&str> = parts.collect();
 
     let base = prog.rsplit('/').next().unwrap_or(prog);
-    if base == "python" || base == "python3" || base.starts_with("python3.") {
-        if args == ["-"] {
+    if (base == "python" || base == "python3" || base.starts_with("python3."))
+        && args == ["-"] {
             return true;
         }
-    }
     if (base == "cat" || base == "read" || base == "tee") && args.is_empty() {
         return true;
     }
@@ -298,9 +331,23 @@ fn spawn_stdin_forwarder(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use crossterm::event::{Event, poll, read};
-        let _ = crossterm::terminal::enable_raw_mode();
+
+        struct RawGuard;
+        impl RawGuard {
+            fn new() -> Self {
+                let _ = crossterm::terminal::enable_raw_mode();
+                RawGuard
+            }
+        }
+        impl Drop for RawGuard {
+            fn drop(&mut self) {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
+        }
+
+        let _guard = RawGuard::new();
         while !stop.load(Ordering::Relaxed) {
-            match poll(Duration::from_millis(100)) {
+            match poll(Duration::from_millis(50)) {
                 Ok(true) => {
                     if let Ok(Event::Key(k)) = read() {
                         let bytes = key_to_bytes(&k);
@@ -316,7 +363,6 @@ fn spawn_stdin_forwarder(
                 Err(_) => break,
             }
         }
-        let _ = crossterm::terminal::disable_raw_mode();
     })
 }
 

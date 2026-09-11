@@ -1,5 +1,7 @@
 //! 交互式 CLI。
 
+use crate::accounts::AccountManager;
+use crate::auth;
 use crate::Runtime;
 use crate::agent::Agent;
 use crate::agent::session_store::SessionStore;
@@ -57,7 +59,8 @@ fn extract_at_paths(input: &str) -> (String, Vec<String>) {
 
 const COMMANDS: &[&str] = &[
     "/help", "/new", "/sessions", "/switch", "/delete",
-    "/think", "/search", "/free", "/safe", "exit", "quit",
+    "/think", "/search", "/free", "/safe", "/account",
+    "exit", "quit",
 ];
 
 const HELP_TEXT: &str = "\
@@ -71,6 +74,11 @@ const HELP_TEXT: &str = "\
   /search [on|off]   开关联网搜索（无参则切换）
   /free              自动批准后续命令（免确认）
   /safe              恢复命令确认
+  /account           列出账号
+  /account add <名>  新增账号（浏览器登录后自动保存）
+  /account del <名>  删除账号
+  /account switch <名>  切换到账号（提示重启）
+  /account rename <旧> <新>  重命名账号
   exit / quit / 退出  退出
   @<路径>            内联附加文件，如: 总结 @./doc.pdf（Tab 补全）
 快捷键：
@@ -78,6 +86,13 @@ const HELP_TEXT: &str = "\
 
 struct AgentCompleter {
     sessions: Vec<(String, String)>,
+    accounts: Vec<String>,
+}
+
+fn account_names() -> Vec<String> {
+    AccountManager::load_default()
+        .map(|m| m.list().iter().map(|a| a.name.clone()).collect())
+        .unwrap_or_default()
 }
 
 impl Completer for AgentCompleter {
@@ -159,6 +174,44 @@ impl Completer for AgentCompleter {
             return Ok((start, out));
         }
 
+        // /account 子命令 + 账号名补全
+        if let Some(cmd) = head_trim.split_whitespace().next()
+            && cmd == "/account"
+        {
+            let pfx = word.trim();
+            let tokens: Vec<&str> = head[..start].split_whitespace().collect();
+
+            if tokens.len() == 1 {
+                for sub in &["add", "del", "switch", "rename"] {
+                    if sub.starts_with(pfx) {
+                        out.push(Pair {
+                            display: sub.to_string(),
+                            replacement: sub.to_string(),
+                        });
+                    }
+                }
+                return Ok((start, out));
+            }
+
+            let sub = tokens.get(1).copied().unwrap_or("");
+            let arg_index = tokens.len();
+            let should_complete_name = match sub {
+                "del" | "switch" | "rename" => arg_index == 2,
+                _ => false,
+            };
+            if should_complete_name {
+                for name in &self.accounts {
+                    if name.starts_with(pfx) {
+                        out.push(Pair {
+                            display: name.clone(),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
+            return Ok((start, out));
+        }
+
         if start == 0 && (word.starts_with('/') || !word.starts_with(' ')) {
             for c in COMMANDS {
                 if c.starts_with(word) {
@@ -181,14 +234,91 @@ impl Highlighter for AgentCompleter {}
 impl Validator for AgentCompleter {}
 
 
-/// 提交给模型前的随机延迟（0-2 秒），防止误触。命令不走此路径。
-async fn random_send_delay() {
-    let ms = rand::random_range(0..=2000u64);
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+/// 交互式新增账号：抓浏览器 token → 存 → 登记
+pub async fn add_account_interactive(name: &str) -> Result<()> {
+    let name = if name.is_empty() {
+        print!("账号名: ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut s = String::new();
+        std::io::stdin()
+            .read_line(&mut s)
+            .map_err(|e| AgentError::Other(e.to_string()))?;
+        s.trim().to_string()
+    } else {
+        name.to_string()
+    };
+    AccountManager::validate_name(&name)?;
+
+    let mut mgr = AccountManager::load_default()?;
+    if mgr.exists(&name) {
+        return Err(AgentError::Config(format!("账号已存在: {name}")));
+    }
+
+    // 账号专属浏览器 profile，实现登录态隔离
+    let profile = mgr.browser_profile(&name);
+
+    println!(
+        "{}[*] 请在弹出的浏览器窗口中登录 DeepSeek 账号「{}」{}",
+        ui::DIM,
+        name,
+        ui::RESET
+    );
+    let token = auth::extract_from_browser(Some(&profile))?;
+
+    mgr.add(&name)?;
+    let rec = auth::TokenRecord::new(token, "browser");
+    let path = mgr.token_file(&name);
+    std::fs::write(&path, serde_json::to_string_pretty(&rec)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    let is_default = mgr.default_account().as_deref() == Some(name.as_str());
+    if is_default {
+        println!(
+            "{}[✓] 账号「{}」已添加并设为默认{}",
+            ui::GREEN,
+            name,
+            ui::RESET
+        );
+    } else {
+        println!(
+            "{}[✓] 账号「{}」已添加{}",
+            ui::GREEN,
+            name,
+            ui::RESET
+        );
+    }
+    Ok(())
+}
+
+async fn switch_account(
+    cfg: &mut Config,
+    rt: &mut Runtime,
+    agent: &mut Agent,
+    name: &str,
+) -> Result<()> {
+    let new_cfg = Config::for_account(name)?;
+    let new_rt = Runtime::new(&new_cfg).await?;
+    let store = SessionStore::load(&new_cfg.session_file);
+    let mut new_agent = Agent::new(new_rt.model()).with_session_store(store);
+    new_agent.set_thinking(agent.thinking());
+    new_agent.set_search(agent.search());
+    new_agent.set_free_mode(agent.free_mode());
+    new_agent.register_tool(Box::new(crate::agent::tool::UploadFile::new(
+        new_rt.http.clone(),
+        new_rt.solver.clone(),
+        new_agent.pending_handle(),
+    )));
+    *cfg = new_cfg;
+    *rt = new_rt;
+    *agent = new_agent;
+    Ok(())
 }
 
 pub async fn run(
-    cfg: Config,
+    mut cfg: Config,
     once: Option<String>,
     files: Vec<String>,
     thinking: bool,
@@ -197,7 +327,28 @@ pub async fn run(
         return Ok(());
     }
 
-    let rt = Runtime::new(&cfg).await?;
+    let mut rt = Runtime::new(&cfg).await?;
+    {
+        let st = rt.interrupt.clone();
+        tokio::spawn(async move {
+            loop {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    continue;
+                }
+                if st.check_double_and_record() {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    std::process::exit(130);
+                }
+                println!("\n{}^C 再按一次退出{}", ui::DIM, ui::RESET);
+                use std::sync::atomic::Ordering;
+                if crate::agent::tool::TOOL_RUNNING.load(Ordering::Relaxed) {
+                    crate::agent::tool::TOOL_INTERRUPT.store(true, Ordering::Relaxed);
+                } else if st.phase.load(Ordering::Relaxed) == crate::PHASE_MODEL {
+                    let _ = st.cancel.lock().map(|c| c.cancel());
+                }
+            }
+        });
+    }
     let store = SessionStore::load(&cfg.session_file);
     let mut agent = Agent::new(rt.model()).with_session_store(store);
     agent.set_thinking(thinking);
@@ -222,14 +373,18 @@ pub async fn run(
     }
 
     if let Some(q) = once {
-        agent.run(&q).await?;
+        rt.interrupt.mark_phase(crate::PHASE_MODEL);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _ = rt.interrupt.cancel.lock().map(|mut c| *c = cancel.clone());
+        let _ = agent.run_with_cancel(&q, cancel).await?;
+        rt.interrupt.mark_phase(crate::PHASE_IDLE);
         return Ok(());
     }
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    ui::print_logo(&cwd);
+    ui::print_logo(&cwd, cfg.account.as_deref());
 
     let _ = crossterm::terminal::disable_raw_mode();
 
@@ -237,7 +392,7 @@ pub async fn run(
         Ok(l) => l.into_iter().map(|s| (s.id, s.title)).collect::<Vec<_>>(),
         Err(_) => Vec::new(),
     };
-    let helper = AgentCompleter { sessions };
+    let helper = AgentCompleter { sessions, accounts: account_names() };
     let mut rl = rustyline::Editor::with_config(
         rustyline::Config::builder()
             .completion_type(rustyline::CompletionType::List)
@@ -256,6 +411,137 @@ pub async fn run(
                 }
                 if matches!(q, "exit" | "quit" | "退出") {
                     break;
+                }
+                if q == "/account" || q.starts_with("/account ") {
+                    let arg = q.strip_prefix("/account").unwrap().trim();
+                    let parts: Vec<&str> = arg.split_whitespace().collect();
+                    let mut mgr = AccountManager::load_default()?;
+                    let cur = cfg.account.clone();
+
+                    match parts.as_slice() {
+                        [] => {
+                            for a in mgr.list() {
+                                let mark = if Some(&a.name) == cur.as_ref() {
+                                    "●"
+                                } else {
+                                    " "
+                                };
+                                println!(
+                                    "{}{} {}{}",
+                                    ui::CYAN,
+                                    mark,
+                                    a.name,
+                                    ui::RESET
+                                );
+                            }
+                        }
+                        ["add", name] => {
+                            add_account_interactive(name).await?;
+                        }
+                        ["del", name] => {
+                            if !mgr.exists(name) {
+                                eprintln!(
+                                    "{}[!] 账号不存在: {}{}",
+                                    ui::RED,
+                                    name,
+                                    ui::RESET
+                                );
+                                continue;
+                            }
+                            let confirmed = matches!(
+                                ui::select_menu(
+                                    &format!("删除账号「{name}」及其所有会话？"),
+                                    &["确认删除", "取消"]
+                                ),
+                                Ok(0)
+                            );
+                            if confirmed {
+                                mgr.remove(name)?;
+                                println!(
+                                    "{}[✓] 已删除账号 {}{}",
+                                    ui::GREEN,
+                                    name,
+                                    ui::RESET
+                                );
+                            }
+                        }
+                        ["switch", name] => {
+                            if !mgr.exists(name) {
+                                eprintln!(
+                                    "{}[!] 账号不存在: {}{}",
+                                    ui::RED,
+                                    name,
+                                    ui::RESET
+                                );
+                                continue;
+                            }
+                            if cur.as_deref() == Some(name) {
+                                println!(
+                                    "{}[·] 已经是当前账号「{}」{}",
+                                    ui::DIM,
+                                    name,
+                                    ui::RESET
+                                );
+                                continue;
+                            }
+                            match switch_account(&mut cfg, &mut rt, &mut agent, name).await {
+                                Ok(()) => {
+                                    let sessions = match chat::list_sessions(&rt.http).await {
+                                        Ok(l) => l.into_iter().map(|s| (s.id, s.title)).collect(),
+                                        Err(_) => Vec::new(),
+                                    };
+                                    rl.set_helper(Some(AgentCompleter {
+                                        sessions,
+                                        accounts: account_names(),
+                                    }));
+                                    let cwd = std::env::current_dir()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_default();
+                                    ui::print_logo(&cwd, cfg.account.as_deref());
+                                    println!(
+                                        "{}[✓] 已切换到账号「{}」{}",
+                                        ui::GREEN,
+                                        name,
+                                        ui::RESET
+                                    );
+                                }
+                                Err(e) => eprintln!("{}[!] 切换失败: {e}{}", ui::RED, ui::RESET),
+                            }
+                        }
+                        ["rename", old, new] => {
+                            if !mgr.exists(old) {
+                                eprintln!("{}[!] 账号不存在: {}{}", ui::RED, old, ui::RESET);
+                                continue;
+                            }
+                            if mgr.exists(new) {
+                                eprintln!("{}[!] 目标名已存在: {}{}", ui::RED, new, ui::RESET);
+                                continue;
+                            }
+                            match mgr.rename(old, new) {
+                                Ok(()) => {
+                                    println!(
+                                        "{}[✓] 账号「{}」已改名为「{}」{}",
+                                        ui::GREEN, old, new, ui::RESET
+                                    );
+                                    if cur.as_deref() == Some(old) {
+                                        println!(
+                                            "{}[!] 当前进程仍绑定旧账号，请重启：lg2 --account {}{}",
+                                            ui::DIM, new, ui::RESET
+                                        );
+                                    }
+                                }
+                                Err(e) => eprintln!("{}[!] 改名失败: {e}{}", ui::RED, ui::RESET),
+                            }
+                        }
+                        _ => {
+                            println!(
+                                "{}用法: /account | /account add <名> | /account del <名> | /account rename <旧> <新> | /account switch <名>{}",
+                                ui::DIM,
+                                ui::RESET
+                            );
+                        }
+                    }
+                    continue;
                 }
                 if q == "/help" {
                     println!("{}{}{}", ui::CYAN, HELP_TEXT, ui::RESET);
@@ -328,7 +614,7 @@ pub async fn run(
                                 Ok(l) => l.into_iter().map(|s| (s.id, s.title)).collect(),
                                 Err(_) => Vec::new(),
                             };
-                            rl.set_helper(Some(AgentCompleter { sessions }));
+                            rl.set_helper(Some(AgentCompleter { sessions, accounts: account_names() }));
                         }
                         Err(e) => eprintln!("{}[!] 新建失败: {e}{}", ui::RED, ui::RESET),
                     }
@@ -369,7 +655,7 @@ pub async fn run(
                                 ui::RESET
                             );
                             let sessions = list.iter().map(|s| (s.id.clone(), s.title.clone())).collect();
-                            rl.set_helper(Some(AgentCompleter { sessions }));
+                            rl.set_helper(Some(AgentCompleter { sessions, accounts: account_names() }));
                         }
                         Err(e) => eprintln!("{}[!] 获取会话列表失败: {e}{}", ui::RED, ui::RESET),
                     }
@@ -665,7 +951,7 @@ pub async fn run(
                         Ok(l) => l.into_iter().map(|s| (s.id, s.title)).collect(),
                         Err(_) => Vec::new(),
                     };
-                    rl.set_helper(Some(AgentCompleter { sessions }));
+                    rl.set_helper(Some(AgentCompleter { sessions, accounts: account_names() }));
                     continue;
                 }
                 let _ = rl.add_history_entry(q);
@@ -701,12 +987,49 @@ pub async fn run(
                 if final_input.is_empty() {
                     continue;
                 }
-                random_send_delay().await;
-                if let Err(e) = agent.run(&final_input).await {
-                    eprintln!("{}[!] 出错: {}{}", ui::RED, e, ui::RESET);
+                rt.interrupt.mark_phase(crate::PHASE_MODEL);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let _ = rt.interrupt.cancel.lock().map(|mut c| *c = cancel.clone());
+
+                let over = agent
+                    .message_count()
+                    .await
+                    .map(|n| n >= cfg.compact_threshold as i64)
+                    .unwrap_or(false);
+                let outcome = if over {
+                    println!(
+                        "{}[交接] 对话已达 {} 条，正在生成报告并开启新会话…{}",
+                        ui::DIM, cfg.compact_threshold, ui::RESET
+                    );
+                    match agent.generate_report(cancel.clone()).await {
+                        Ok(report) => {
+                            agent
+                                .start_with_handoff(&report, &final_input, cancel.clone())
+                                .await
+                        }
+                        Err(e) => {
+                            eprintln!("{}[!] 生成报告失败，按普通对话继续: {e}{}", ui::RED, ui::RESET);
+                            agent.run_with_cancel(&final_input, cancel.clone()).await
+                        }
+                    }
+                } else {
+                    agent.run_with_cancel(&final_input, cancel).await
+                };
+                rt.interrupt.mark_phase(crate::PHASE_IDLE);
+                match outcome {
+                    Ok(crate::agent::core::RunOutcome::Interrupted) => {}
+                    Ok(crate::agent::core::RunOutcome::Done(_)) => {}
+                    Err(e) => {
+                        eprintln!("{}[!] 出错: {}{}", ui::RED, e, ui::RESET);
+                    }
                 }
             }
-            Err(ReadlineError::Interrupted) => break,
+            Err(ReadlineError::Interrupted) => {
+                if rt.interrupt.check_double_and_record() {
+                    break;
+                }
+                println!("{}^C 再按一次退出{}", ui::DIM, ui::RESET);
+            }
             Err(ReadlineError::Eof) => break,
             Err(e) => {
                 eprintln!("{}[!] 输入错误: {}{}", ui::RED, e, ui::RESET);

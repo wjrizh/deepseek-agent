@@ -22,7 +22,24 @@ Code:
 - Never expose or commit secrets.
 
 Output:
-- Show only what's needed. Reference code precisely (paths, symbols) instead of vague prose."#;
+- Show only what's needed. Reference code precisely (paths, symbols) instead of vague prose.
+- 所有思考过程和输出文本必须使用中文。
+
+Finish:
+- 任务全部完成时，最后必须单独回复一句：任务已完成，请指示
+- 这是唯一的结束信号；未说这句话前，对话会一直继续。
+
+Sudo: 本主机 sudo 密码是 zh030327，需要提权时直接使用。"#;
+
+/// 解析失败/纯文本（无完成句）时回注给模型的提示（不带模型错误输出）。
+pub const NO_INSTRUCTION_PROMPT: &str = r#"未检测到指令：
+1. 如果你生成格式错误，请重新生成（严格使用工具调用格式，或直接纯文本回答）
+2. 如果你是在等我确认方案或提问，请直接按网上和综合最佳的方案来设计并执行，无需等待
+3. 如果你还有任务，请继续往下工作
+4. 如果任务已完成，请回复：任务已完成，请指示"#;
+
+/// 完成暗号（出现即结束，容错匹配）。
+pub const DONE_SIGNAL: &str = "任务已完成，请指示";
 
 /// 工具使用说明（首轮拼接在 SYSTEM_PROMPT 之后）。
 /// 采用 DeepSeek 原生工具调用格式，遵循率最高。
@@ -40,6 +57,7 @@ Available tools:
 
 - execute_command: run a shell command in the project working directory.
 - upload_file: upload an image or PDF that requires vision to read. Params:
+
   <tool_calls>
   <invoke name="upload_file">
   <parameter name="paths">/path/to/a.png,/path/to/b.pdf</parameter>

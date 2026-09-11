@@ -375,10 +375,17 @@ fn find_lenient_close(lower: &str, from: usize, name: &str) -> Option<(usize, us
 
 /// 完全没有闭合标签时的兜底：截到下一个标签起点；没有则到串尾。
 fn next_boundary(lower: &str, from: usize) -> usize {
-    lower[from..]
-        .find('<')
-        .map(|r| from + r)
-        .unwrap_or(lower.len())
+    let rest = &lower[from..];
+    let mut i = 0;
+    while let Some(rel) = rest[i..].find('<') {
+        let abs = i + rel;
+        let after = rest[abs + 1..].chars().next();
+        if matches!(after, Some(c) if c == '/' || c.is_ascii_alphabetic()) {
+            return from + abs;
+        }
+        i = abs + 1;
+    }
+    lower.len()
 }
 
 /// 从标签里取属性值，兼容双引号 / 单引号 / 无引号。
@@ -547,6 +554,11 @@ fn extract_params(body: &str) -> HashMap<String, String> {
     let mut i = 0usize;
     while let Some(rel) = lower[i..].find('<') {
         let lt = i + rel;
+        let after = lower[lt + 1..].chars().next();
+        if !matches!(after, Some(c) if c == '/' || c.is_ascii_alphabetic()) {
+            i = lt + 1;
+            continue;
+        }
         if lower[lt..].starts_with("</") {
             match lower[lt..].find('>') {
                 Some(g) => {
@@ -845,6 +857,17 @@ mod tests {
         match parse(input) {
             ParseOutcome::Call(c) => assert_eq!(c.name, "execute_command"),
             other => panic!("期望 Call，得到 {other:?}"),
+        }
+    }
+        #[test]
+    fn native_redirect_lt_not_truncated_in_command() {
+        let input = "<invoke name=\"execute_command\">\
+                     <parameter name=\"command\">tr -d x < ~/.zshrc</invoke>";
+        match parse(input) {
+            ParseOutcome::Call(c) => {
+                assert_eq!(c.params.get("command").unwrap(), "tr -d x < ~/.zshrc")
+            }
+            other => panic!("expected Call, got {other:?}"),
         }
     }
 }

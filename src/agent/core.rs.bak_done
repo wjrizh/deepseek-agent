@@ -6,7 +6,7 @@
 use crate::agent::memory::{InMemory, Memory, Message, Role};
 use crate::agent::model::{Model, ModelReply};
 use crate::agent::parser::{self, ParseOutcome};
-use crate::agent::prompt::{SYSTEM_PROMPT, TOOLS_SECTION, NO_INSTRUCTION_PROMPT, DONE_SIGNAL};
+use crate::agent::prompt::{SYSTEM_PROMPT, TOOLS_SECTION};
 use crate::agent::session_store::{SessionRecord, SessionStore};
 use crate::agent::tool::{ExecuteCommand, ToolRegistry};
 use crate::api::types::CompletionReq;
@@ -16,12 +16,13 @@ use std::time::Instant;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-// （已移除重试上限，改由"未检测到指令"提示驱动）
+/// 解析失败的最大重试次数。
+const MAX_MALFORMED_RETRIES: u32 = 2;
 
-/// 每次向模型发送内容前的随机延迟（7-11 秒），防误触并降低风控触发。
+/// 每次向模型发送内容前的随机延迟（8-12 秒），防误触并降低风控触发。
 /// 可被 cancel 打断。
 async fn send_delay(cancel: &CancellationToken) {
-let ms = rand::random_range(7000..=11000u64);
+    let ms = rand::random_range(8000..=12000u64);
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
         _ = cancel.cancelled() => {}
@@ -298,7 +299,9 @@ impl Agent {
             input.to_string()
         };
 
-loop {
+        let mut malformed_retries = 0u32;
+
+        loop {
             let mut req =
                 CompletionReq::new(self.session_id.clone().unwrap(), next_prompt.clone());
             req.parent_message_id = self.parent_message_id;
@@ -349,44 +352,59 @@ loop {
                 let _ = self.store.update_title(&sid, t);
             }
 
-            // 先判完成暗号：回复中出现（容错）即结束
-            if is_done_signal(&reply.content) {
-            self.memory.push(Message {
-            role: Role::Assistant,
-            content: reply.content.clone(),
-            });
-            return Ok(RunOutcome::Done(reply));
-            }
-
             match parser::parse(&reply.content) {
-            ParseOutcome::Call(call) => {
-            if cancel.is_cancelled() {
-            return Ok(RunOutcome::Interrupted);
-            }
-            let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            let live = tty;
-            let result = self.run_tool(&call, live).await;
-            if result.starts_with("[INTERRUPTED]") {
-            if tty {
-            println!(
-            "\n{}[已中断]{}",
-            crate::ui::DIM,
-            crate::ui::RESET
-            );
-            }
-            return Ok(RunOutcome::Done(reply));
-            }
-            if !tty {
-            crate::ui::print_tool_result(&result);
-            }
-            next_prompt = format!("<tool_result>\n{result}\n</tool_result>");
-            }
-            ParseOutcome::Text(_) | ParseOutcome::Malformed { .. } => {
-            if cancel.is_cancelled() {
-            return Ok(RunOutcome::Interrupted);
-            }
-            next_prompt = NO_INSTRUCTION_PROMPT.to_string();
-            }
+                ParseOutcome::Text(_) => {
+                    self.memory.push(Message {
+                        role: Role::Assistant,
+                        content: reply.content.clone(),
+                    });
+                    return Ok(RunOutcome::Done(reply));
+                }
+                ParseOutcome::Call(call) => {
+                    if cancel.is_cancelled() {
+                        return Ok(RunOutcome::Interrupted);
+                    }
+                    malformed_retries = 0;
+                    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+                    let live = tty;
+                    let result = self.run_tool(&call, live).await;
+                    if result.starts_with("[INTERRUPTED]") {
+                        if tty {
+                            println!(
+                                "\n{}[已中断]{}",
+                                crate::ui::DIM,
+                                crate::ui::RESET
+                            );
+                        }
+                        return Ok(RunOutcome::Done(reply));
+                    }
+                    if !tty {
+                        crate::ui::print_tool_result(&result);
+                    }
+                    next_prompt = format!("<tool_result>\n{result}\n</tool_result>");
+                }
+                ParseOutcome::Malformed { raw, reason } => {
+                    if cancel.is_cancelled() {
+                        return Ok(RunOutcome::Interrupted);
+                    }
+                    malformed_retries += 1;
+                    if malformed_retries > MAX_MALFORMED_RETRIES {
+                        self.memory.push(Message {
+                            role: Role::Assistant,
+                            content: reply.content.clone(),
+                        });
+                        return Ok(RunOutcome::Done(reply));
+                    }
+                    next_prompt = format!(
+                        "Your previous reply could not be parsed as a tool call.\n\
+                         Error: {reason}\n\
+                         Your output was:\n{raw}\n\n\
+                         Reply with EXACTLY ONE valid <execute_command> tool call, \
+                         or a plain text answer if no tool is needed.\n\
+                         Do NOT quote the literal tags <tool_calls>/<invoke>/<parameter> \
+                         inside the command value."
+                    );
+                }
             }
         }
     }

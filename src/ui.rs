@@ -12,6 +12,7 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use std::io::{IsTerminal, Write, stdout};
 use std::sync::atomic::Ordering;
+use unicode_width::UnicodeWidthStr;
 
 // ---------- ANSI 颜色 ----------
 pub const RESET: &str = "\x1b[0m";
@@ -19,6 +20,10 @@ pub const DIM: &str = "\x1b[2m";
 pub const GREEN: &str = "\x1b[1;32m";
 pub const CYAN: &str = "\x1b[36m";
 pub const RED: &str = "\x1b[31m";
+pub const ANSWER: &str = "\x1b[1;95m";
+pub const SEP: &str = "\x1b[2;90m";
+pub const TOOL: &str = "\x1b[38;5;244m";
+pub const TOOL_OUT: &str = "\x1b[38;5;180m";
 
 const LOGO: &str = r#"          ██
           ██                      ████████████████████████
@@ -35,18 +40,25 @@ const LOGO: &str = r#"          ██
   ████                ████                  ████
 ████            ████████        ████████████████████████████"#;
 
+fn print_round_separator() {
+    let w = term_width().min(72);
+    let line = "─".repeat(w);
+    print!("\n{SEP}{line}{RESET}\n");
+    let _ = stdout().flush();
+}
+
 fn term_width() -> usize {
     size().map(|(w, _)| w as usize).unwrap_or(80)
 }
 
 fn center_pad(text: &str) -> String {
     let w = term_width();
-    let len = text.chars().count();
+    let len = text.width();
     " ".repeat(w.saturating_sub(len) / 2)
 }
 
-/// 打印启动 logo（居中）
-pub fn print_logo(cwd: &str) {
+/// 打印启动 logo（居中）。account=None 表示未绑定账号。
+pub fn print_logo(cwd: &str, account: Option<&str>) {
     print!("\x1b[2J\x1b[3J\x1b[H");
     let _ = stdout().flush();
 
@@ -60,6 +72,10 @@ pub fn print_logo(cwd: &str) {
     let title = "力工 Code v1.0.0";
     println!("{}{CYAN}{title}{RESET}", center_pad(title));
     println!("{}{CYAN}{cwd}{RESET}", center_pad(cwd));
+    if let Some(name) = account {
+        let label = format!("账号: {name}");
+        println!("{}{GREEN}{label}{RESET}", center_pad(&label));
+    }
     println!();
 }
 
@@ -122,6 +138,12 @@ fn trust_menu_inner(out: &mut std::io::Stdout) -> Result<bool> {
 }
 
 /// 打印工具执行结果（暗色）。
+/// 自动重试/长等待时的对话栏提示（暗色，单行覆盖式）。
+pub fn notice_waiting(msg: &str) {
+    eprint!("\r{DIM}{msg}{RESET}\x1b[K");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
 pub fn print_tool_result(result: &str) {
     println!("{DIM}──────── tool result ────────{RESET}");
     for line in result.lines() {
@@ -390,7 +412,7 @@ impl Painter {
             hold: String::new(),
             code_color: "\x1b[36m",
             date_color: "\x1b[2;36m",
-            reset: "\x1b[0m",
+            reset: "\x1b[1;95m",
         }
     }
 
@@ -576,9 +598,11 @@ impl LiveUi {
                 if !out.is_empty() {
                     if !self.prefix_printed {
                         self.prefix_printed = true;
-                        print!("\x1b[1;32mligong > \x1b[0m");
+                        print_round_separator();
+                        print!("{ANSWER}ligong > {out}");
+                    } else {
+                        print!("{out}");
                     }
-                    print!("{out}");
                     let _ = std::io::stdout().flush();
                 }
             }
@@ -639,11 +663,14 @@ impl LiveUi {
             if !tail.is_empty() {
                 if !self.prefix_printed {
                     self.prefix_printed = true;
-                    print!("\x1b[1;32mligong > \x1b[0m");
+                    print_round_separator();
+                    print!("{ANSWER}ligong > {tail}");
+                } else {
+                    print!("{tail}");
                 }
-                print!("{tail}");
             }
             if self.prefix_printed {
+                print!("{RESET}");
                 println!();
             }
             let _ = std::io::stdout().flush();
@@ -709,9 +736,11 @@ impl PlainUi {
                 if !out.is_empty() {
                     if !self.prefix_printed {
                         self.prefix_printed = true;
-                        print!("ligong > ");
+                        print_round_separator();
+                        print!("{ANSWER}ligong > {out}");
+                    } else {
+                        print!("{out}");
                     }
-                    print!("{out}");
                     let _ = std::io::stdout().flush();
                 }
             }
@@ -733,11 +762,14 @@ impl PlainUi {
             if !tail.is_empty() {
                 if !self.prefix_printed {
                     self.prefix_printed = true;
-                    print!("ligong > ");
+                    print_round_separator();
+                    print!("{ANSWER}ligong > {tail}");
+                } else {
+                    print!("{tail}");
                 }
-                print!("{tail}");
             }
             if self.prefix_printed {
+                print!("{RESET}");
                 println!();
             }
             let _ = std::io::stdout().flush();

@@ -7,7 +7,7 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("HTTP 请求失败: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] wreq::Error),
 
     #[error("JSON 解析失败: {0}")]
     Json(#[from] serde_json::Error),
@@ -29,6 +29,9 @@ pub enum AgentError {
 
     #[error("配置错误: {0}")]
     Config(String),
+
+    #[error("模型返回空回复（疑似限流）")]
+    EmptyReply,
 
     #[error("{0}")]
     Other(String),

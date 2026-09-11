@@ -2,18 +2,19 @@
 import sys
 import time
 import json
+import argparse
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-PROFILE_DIR = Path.home() / ".deepseek-agent" / "browser"
-PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_PROFILE = Path.home() / ".deepseek-agent" / "browser"
 
 
-def try_extract(headless: bool, wait_secs: int):
+def try_extract(profile_dir: Path, headless: bool, wait_secs: int):
+    profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             headless=headless,
             args=["--disable-blink-features=AutomationControlled"],
         )
@@ -38,13 +39,22 @@ def try_extract(headless: bool, wait_secs: int):
 
 
 def main():
-    token = try_extract(headless=True, wait_secs=8)
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--profile",
+        default=str(DEFAULT_PROFILE),
+        help="Chromium user-data-dir (每账号一个，隔离登录态)",
+    )
+    args = ap.parse_args()
+    profile_dir = Path(args.profile).expanduser()
+
+    token = try_extract(profile_dir, headless=True, wait_secs=8)
     if token:
         print(token, flush=True)
         return
 
     print("[token] 需要登录，正在打开浏览器...", file=sys.stderr)
-    token = try_extract(headless=False, wait_secs=180)
+    token = try_extract(profile_dir, headless=False, wait_secs=180)
     if token:
         print(token, flush=True)
         return

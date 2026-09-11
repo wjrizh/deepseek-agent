@@ -32,8 +32,8 @@ pub async fn upload(
     let pow_header = make_pow_header(http, solver, PATH_UPLOAD).await?;
 
     // 2. 构造 multipart
-    let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.clone());
-    let form = reqwest::multipart::Form::new().part("file", part);
+    let part = wreq::multipart::Part::bytes(bytes).file_name(file_name.clone());
+    let form = wreq::multipart::Form::new().part("file", part);
 
     let mut headers = http.headers()?;
     headers.insert("x-ds-pow-response", pow_header.parse().unwrap());
