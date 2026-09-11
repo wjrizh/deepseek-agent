@@ -756,7 +756,7 @@ impl PlainUi {
                 self.tick += 1;
                 let spin = SPIN[self.tick % SPIN.len()];
                 let dots = (self.tick / 4) % 4;
-                render_status_line(spin, "思考中", dots);
+                render_status_line(spin, "模型拉屎中", dots);
             }
             DeltaKind::Answer => {
                 if !self.answer_started {
