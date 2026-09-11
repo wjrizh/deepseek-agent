@@ -146,6 +146,17 @@ pub fn notice_waiting(msg: &str) {
 
 /// 发送前随机延迟的滚动提示（spinner + 轮播文案，暗灰/青色，单行覆盖式，写 stderr）。
 /// 总时长 total_ms 与随机延迟一致；每 80ms 刷新一次，可被 cancel 打断并清行。
+/// 单行状态行渲染：发送延迟与思考 spinner 共用，保证视觉连续、衔接顺滑。
+pub fn render_status_line(spin: char, phrase: &str, dots: usize) {
+    let mut out = std::io::stdout();
+    let _ = write!(
+        out,
+        "\r\x1b[K{DIM}{CYAN}{spin}{RESET}{DIM} {phrase}{}{RESET}",
+        ".".repeat(dots)
+    );
+    let _ = out.flush();
+}
+
 pub fn send_delay_bar(total_ms: u64, cancel: &tokio_util::sync::CancellationToken) {
     const PHRASES: [&str; 5] = [
         "正在连接 DeepSeek",
@@ -155,7 +166,6 @@ pub fn send_delay_bar(total_ms: u64, cancel: &tokio_util::sync::CancellationToke
         "马上就好",
     ];
     let total = total_ms.max(1);
-    let mut out = std::io::stderr();
     let tick_ms = 80u64;
     let steps = (total / tick_ms).max(1);
     let mut i = 0u64;
@@ -163,16 +173,15 @@ pub fn send_delay_bar(total_ms: u64, cancel: &tokio_util::sync::CancellationToke
         let elapsed = i * tick_ms;
         let spin = SPIN[(i % SPIN.len() as u64) as usize];
         let phase = ((elapsed * PHRASES.len() as u64 / total) as usize).min(PHRASES.len() - 1);
-        let phrase = PHRASES[phase];
-        let dots = ".".repeat(((i / 4) % 4) as usize);
-        let _ = write!(out, "\r\x1b[K{DIM}{CYAN}{spin}{RESET}{DIM} {phrase}{dots} {RESET}");
-        let _ = out.flush();
+        let dots = ((i / 4) % 4) as usize;
+        render_status_line(spin, PHRASES[phase], dots);
         if cancel.is_cancelled() || i >= steps {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(tick_ms));
         i += 1;
     }
+    let mut out = std::io::stdout();
     let _ = write!(out, "\r\x1b[K");
     let _ = out.flush();
 }
@@ -743,16 +752,11 @@ impl PlainUi {
                 if self.answer_started {
                     return;
                 }
-                const SPIN: [char; 10] =
-                    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                if !self.spinner_on {
-                    self.spinner_on = true;
-                    print!("{DIM}");
-                }
+                self.spinner_on = true;
                 self.tick += 1;
-                let s = SPIN[self.tick % SPIN.len()];
-                print!("\r\x1b[K{s} thinking...");
-                let _ = std::io::stdout().flush();
+                let spin = SPIN[self.tick % SPIN.len()];
+                let dots = (self.tick / 4) % 4;
+                render_status_line(spin, "思考中", dots);
             }
             DeltaKind::Answer => {
                 if !self.answer_started {
