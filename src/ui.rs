@@ -24,6 +24,7 @@ pub const ANSWER: &str = "\x1b[1;95m";
 pub const SEP: &str = "\x1b[2;90m";
 pub const TOOL: &str = "\x1b[38;5;244m";
 pub const TOOL_OUT: &str = "\x1b[38;5;180m";
+pub const THINKING: &str = "\x1b[38;5;110m";
 
 const LOGO: &str = r#"          ██
           ██                      ████████████████████████
@@ -669,7 +670,7 @@ impl LiveUi {
             let total = display_height(&content, area.width);
             let scroll = total.saturating_sub(area.height);
             let para = Paragraph::new(content)
-                .style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().fg(Color::Indexed(110)))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0));
             frame.render_widget(para, area);
@@ -729,8 +730,7 @@ pub struct PlainUi {
     filter: TagFilter,
     painter: Painter,
     prefix_printed: bool,
-    spinner_on: bool,
-    tick: usize,
+    thinking_started: bool,
 }
 
 impl PlainUi {
@@ -741,8 +741,7 @@ impl PlainUi {
             filter: TagFilter::new(),
             painter: Painter::new(),
             prefix_printed: false,
-            spinner_on: false,
-            tick: 0,
+            thinking_started: false,
         }
     }
 
@@ -752,18 +751,20 @@ impl PlainUi {
                 if self.answer_started {
                     return;
                 }
-                self.spinner_on = true;
-                self.tick += 1;
-                let spin = SPIN[self.tick % SPIN.len()];
-                let dots = (self.tick / 4) % 4;
-                render_status_line(spin, "模型拉屎中", dots);
+                if !self.thinking_started {
+                    self.thinking_started = true;
+                    print_round_separator();
+                    print!("{THINKING}💭 thinking > ");
+                }
+                print!("{text}");
+                let _ = std::io::stdout().flush();
             }
             DeltaKind::Answer => {
                 if !self.answer_started {
                     self.answer_started = true;
-                    if self.spinner_on {
-                        self.spinner_on = false;
-                        print!("\r\x1b[K{RESET}");
+                    if self.thinking_started {
+                        self.thinking_started = false;
+                        print!("\n{RESET}");
                         let _ = std::io::stdout().flush();
                     }
                 }
@@ -785,9 +786,9 @@ impl PlainUi {
     }
 
     pub fn finish(&mut self) {
-        if self.spinner_on {
-            self.spinner_on = false;
-            print!("\r\x1b[K{RESET}");
+        if self.thinking_started {
+            self.thinking_started = false;
+            print!("\n{RESET}");
             let _ = std::io::stdout().flush();
         }
         if self.answer_started {
@@ -827,7 +828,12 @@ pub enum AnyUi {
 }
 
 impl AnyUi {
-    pub fn new() -> Self {
+    pub fn new(thinking: bool) -> Self {
+        if thinking && std::io::stdout().is_terminal() {
+            if let Ok(ui) = LiveUi::new() {
+                return AnyUi::Live(ui);
+            }
+        }
         AnyUi::Plain(PlainUi::new())
     }
 
@@ -848,6 +854,6 @@ impl AnyUi {
 
 impl Default for AnyUi {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }

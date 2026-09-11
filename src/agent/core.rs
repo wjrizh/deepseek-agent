@@ -320,7 +320,7 @@ loop {
                 return Ok(RunOutcome::Interrupted);
             }
 
-            let mut ui = crate::ui::AnyUi::new();
+            let mut ui = crate::ui::AnyUi::new(self.thinking);
             let reply = match self
                 .complete_with_retry(&req, &cancel, &mut |kind, delta| {
                     ui.on_delta(kind, delta);
@@ -403,13 +403,15 @@ loop {
     ) -> Result<ModelReply> {
         match self.model.complete(req, on_delta).await {
             Ok(r) => return Ok(r),
-            Err(crate::error::AgentError::EmptyReply) => {}
+            Err(crate::error::AgentError::EmptyReply) => {
+                crate::ui::notice_waiting("检测到空回复（疑似限流），正在刷新会话并自动重试…");
+                let _ = self.refresh_current_session().await;
+            }
+            Err(e @ crate::error::AgentError::RateLimited { .. }) => {
+                crate::ui::notice_waiting(&format!("{e}，进入长退避重试…"));
+            }
             Err(e) => return Err(e),
         }
-
-        crate::ui::notice_waiting("检测到空回复（疑似限流），正在刷新会话并自动重试…");
-        let _ = self.refresh_current_session().await;
-
         for attempt in 1..=5u32 {
             if cancel.is_cancelled() {
                 return Err(crate::error::AgentError::Other("[已中断]".into()));
@@ -419,6 +421,7 @@ loop {
             match self.model.complete(req, on_delta).await {
                 Ok(r) => return Ok(r),
                 Err(crate::error::AgentError::EmptyReply) => continue,
+                Err(crate::error::AgentError::RateLimited { .. }) => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -440,6 +443,9 @@ loop {
             match self.model.complete(req, on_delta).await {
                 Ok(r) => return Ok(r),
                 Err(crate::error::AgentError::EmptyReply) => {
+                    wait_secs = (wait_secs + 60).min(180);
+                }
+                Err(crate::error::AgentError::RateLimited { .. }) => {
                     wait_secs = (wait_secs + 60).min(180);
                 }
                 Err(e) => return Err(e),
