@@ -21,9 +21,11 @@ use tokio_util::sync::CancellationToken;
 /// 每次向模型发送内容前的随机延迟（7-11 秒），防误触并降低风控触发。
 /// 可被 cancel 打断。
 async fn send_delay(cancel: &CancellationToken) {
-let ms = rand::random_range(7000..=11000u64);
+    let ms = rand::random_range(7000..=11000u64);
+    let token = cancel.clone();
+    let bar = tokio::task::spawn_blocking(move || crate::ui::send_delay_bar(ms, &token));
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+        _ = bar => {}
         _ = cancel.cancelled() => {}
     }
 }

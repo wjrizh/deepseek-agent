@@ -17,7 +17,7 @@ pub const PATH_SESSION_DELETE: &str = "/api/v0/chat_session/delete";
 /// 新建会话，返回 session_id
 pub async fn create_session(http: &HttpClient) -> Result<String> {
     let url = format!("{}{}", http.base_url(), PATH_SESSION_CREATE);
-    let mut headers = http.headers()?;
+    let mut headers = http.prepare().await?;
     headers.insert("content-type", "application/json".parse().unwrap());
 
     let resp = http
@@ -51,7 +51,7 @@ pub async fn completion(
     let pow_header = crate::api::file::make_pow_header(http, solver, PATH_COMPLETION).await?;
 
     let url = format!("{}{}", http.base_url(), PATH_COMPLETION);
-    let mut headers = http.headers()?;
+    let mut headers = http.prepare().await?;
     headers.insert("content-type", "application/json".parse().unwrap());
     headers.insert("x-ds-pow-response", pow_header.parse().unwrap());
 
@@ -218,7 +218,7 @@ pub struct OnlineSession {
 /// 列出全部在线会话
 pub async fn list_sessions(http: &HttpClient) -> Result<Vec<OnlineSession>> {
     let url = format!("{}{}", http.base_url(), PATH_SESSION_LIST);
-    let headers = http.headers()?;
+    let headers = http.prepare().await?;
     let resp = http.client().get(&url).headers(headers).send().await?;
     let text = resp.text().await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
@@ -248,7 +248,7 @@ pub async fn latest_message_id(http: &HttpClient, session_id: &str) -> Result<Op
         PATH_HISTORY,
         session_id
     );
-    let headers = http.headers()?;
+    let headers = http.prepare().await?;
     let resp = http.client().get(&url).headers(headers).send().await?;
     let text = resp.text().await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
@@ -256,6 +256,25 @@ pub async fn latest_message_id(http: &HttpClient, session_id: &str) -> Result<Op
     HttpClient::ensure_ok(code, v["msg"].as_str().unwrap_or(""))?;
     let mid = v["data"]["biz_data"]["chat_session"]["current_message_id"].as_i64();
     Ok(mid)
+}
+
+/// 取会话真实消息条数（用于自动交接阈值判断）。
+pub async fn message_count(http: &HttpClient, session_id: &str) -> Result<Option<i64>> {
+    let url = format!(
+        "{}{}?chat_session_id={}",
+        http.base_url(),
+        PATH_HISTORY,
+        session_id
+    );
+    let headers = http.prepare().await?;
+    let resp = http.client().get(&url).headers(headers).send().await?;
+    let text = resp.text().await?;
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    HttpClient::ensure_ok(v["code"].as_i64().unwrap_or(-1), v["msg"].as_str().unwrap_or(""))?;
+    let n = v["data"]["biz_data"]["chat_messages"]
+        .as_array()
+        .map(|arr| arr.len() as i64);
+    Ok(n)
 }
 
 /// 会话里的单条历史消息（精简）
@@ -278,7 +297,7 @@ pub async fn history_tail(
         PATH_HISTORY,
         session_id
     );
-    let headers = http.headers()?;
+    let headers = http.prepare().await?;
     let resp = http.client().get(&url).headers(headers).send().await?;
     let text = resp.text().await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
@@ -320,7 +339,7 @@ pub async fn history_tail(
 
 pub async fn delete_session(http: &HttpClient, session_id: &str) -> Result<()> {
     let url = format!("{}{}", http.base_url(), PATH_SESSION_DELETE);
-    let mut headers = http.headers()?;
+    let mut headers = http.prepare().await?;
     headers.insert("content-type", "application/json".parse().unwrap());
     let resp = http
         .client()
@@ -358,7 +377,7 @@ pub async fn session_branches(http: &HttpClient, session_id: &str) -> Result<Vec
         PATH_HISTORY,
         session_id
     );
-    let headers = http.headers()?;
+    let headers = http.prepare().await?;
     let resp = http.client().get(&url).headers(headers).send().await?;
     let text = resp.text().await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;

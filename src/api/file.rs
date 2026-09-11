@@ -6,6 +6,34 @@ use crate::client::pow::PowSolver;
 use crate::error::{AgentError, Result};
 use base64::Engine;
 
+
+/// 已知的风控/限流业务码。命中表示请求被限制，不应盲目重试。
+/// - 5: user is muted（用户被禁言/限流）
+/// - 429: HTTP Too Many Requests
+fn risk_code_msg(code: i64, msg: &str) -> Option<AgentError> {
+    match code {
+        5 | 429 => Some(AgentError::RateLimited {
+            code,
+            msg: msg.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// 解析响应顶层 code / data.biz_code，命中风控码则返回 RateLimited。
+fn check_risk(text: &str) -> Option<AgentError> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let top_code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+    let top_msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+    if let Some(e) = risk_code_msg(top_code, top_msg) {
+        return Some(e);
+    }
+    let data = v.get("data")?;
+    let biz_code = data.get("biz_code").and_then(|c| c.as_i64()).unwrap_or(0);
+    let biz_msg = data.get("biz_msg").and_then(|m| m.as_str()).unwrap_or("");
+    risk_code_msg(biz_code, biz_msg)
+}
+
 pub const PATH_UPLOAD: &str = "/api/v0/file/upload_file";
 
 /// 单次调用最多上传的文件数。
@@ -35,7 +63,7 @@ pub async fn upload(
     let part = wreq::multipart::Part::bytes(bytes).file_name(file_name.clone());
     let form = wreq::multipart::Form::new().part("file", part);
 
-    let mut headers = http.headers()?;
+    let mut headers = http.prepare().await?;
     headers.insert("x-ds-pow-response", pow_header.parse().unwrap());
     headers.insert("x-file-size", file_size.to_string().parse().unwrap());
 
@@ -51,10 +79,14 @@ pub async fn upload(
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(AgentError::Api {
-            code: status.as_u16() as i64,
-            msg: text,
-        });
+        let code = status.as_u16() as i64;
+        if let Some(e) = risk_code_msg(code, &text) {
+            return Err(e);
+        }
+        return Err(AgentError::Api { code, msg: text });
+    }
+    if let Some(e) = check_risk(&text) {
+        return Err(e);
     }
     let parsed: ApiResponse<FileInfo> = serde_json::from_str(&text)?;
     HttpClient::ensure_ok(parsed.code, &parsed.msg)?;
@@ -90,7 +122,7 @@ pub async fn make_pow_header(
 /// 取 PoW 挑战
 pub async fn create_challenge(http: &HttpClient, target_path: &str) -> Result<PowChallenge> {
     let url = format!("{}/api/v0/chat/create_pow_challenge", http.base_url());
-    let mut headers = http.headers()?;
+    let mut headers = http.prepare().await?;
     headers.insert("content-type", "application/json".parse().unwrap());
 
     let resp = http
@@ -103,6 +135,9 @@ pub async fn create_challenge(http: &HttpClient, target_path: &str) -> Result<Po
         .send()
         .await?;
     let text = resp.text().await?;
+    if let Some(e) = check_risk(&text) {
+        return Err(e);
+    }
     let parsed: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
     HttpClient::ensure_ok(parsed.code, &parsed.msg)?;
     let ch_val = parsed

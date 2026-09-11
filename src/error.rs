@@ -33,6 +33,9 @@ pub enum AgentError {
     #[error("模型返回空回复（疑似限流）")]
     EmptyReply,
 
+    #[error("触发风控/限流 (code={code}): {msg}")]
+    RateLimited { code: i64, msg: String },
+
     #[error("{0}")]
     Other(String),
 }

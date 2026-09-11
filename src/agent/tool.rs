@@ -134,6 +134,10 @@ impl Tool for ExecuteCommand {
             );
         }
 
+        // 只剥离阻塞型管道段（tail/head/分页器），保留 grep/awk 等流式过滤段。
+        let (cmd, pipe_stripped) = strip_all_pipes(cmd);
+        let cmd = cmd.as_str();
+
         let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
 
         let pty_system = native_pty_system();
@@ -299,8 +303,92 @@ impl Tool for ExecuteCommand {
                 truncate(clean, MAX_TOOL_OUTPUT)
             ));
         }
-        Ok(format_result(0, &clean))
+        let mut result = format_result(0, &clean);
+        if pipe_stripped {
+            result.push_str(
+                "\n[提示] 已自动剥离阻塞型管道段（tail/head/分页器等）以保证输出实时；grep/awk 等流式过滤段保留。",
+            );
+        }
+        Ok(result)
     }
+}
+
+/// 剥离命令中所有顶层管道段，只保留第一段执行。
+///
+/// 目的：`cmd | tail` / `| head` / `| grep` 等会缓冲输出，在流式显示
+/// 场景下表现为命令卡住不打印。这里只执行第一个管道段，让输出实时
+/// 到达 agent，由 agent 在结束时按 MAX_TOOL_OUTPUT 自行截断。
+///
+/// 规则：
+/// - 按顶层 `|` 切分，只取第一段。
+/// - 忽略单双引号内的 `|`。
+/// - 忽略 `||`（逻辑或）。
+/// - 保留重定向（> / 2>&1）等，它们不阻塞输出。
+///
+/// 取舍：会改变 `cat x | grep y` 这类靠管道过滤的语义，以实时性优先。
+/// 返回 (改写后的命令, 是否发生剥离)。
+fn strip_all_pipes(cmd: &str) -> (String, bool) {
+    // 1. 按顶层 | 切分成段（忽略引号内 | 与 ||）
+    let segments = split_top_pipes(cmd);
+    if segments.len() <= 1 {
+        return (cmd.to_string(), false);
+    }
+    // 2. 剔除阻塞/分页段，保留流式过滤段（grep/awk/sed/cut/sort 等）
+    let mut kept: Vec<&str> = Vec::new();
+    let mut removed = false;
+    for seg in &segments {
+        if is_blocking_filter(seg) {
+            removed = true;
+        } else {
+            kept.push(seg);
+        }
+    }
+    if !removed || kept.is_empty() {
+        return (cmd.to_string(), removed && kept.is_empty());
+    }
+    (kept.join(" | "), true)
+}
+
+/// 按顶层 `|` 切分命令（忽略单双引号内的 `|`，忽略 `||`）。
+/// 返回各段（已 trim）；不含管道时返回单元素。
+fn split_top_pipes(cmd: &str) -> Vec<&str> {
+    let bytes = cmd.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut segs: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == 39u8 || b == 34u8 {
+            quote = Some(b);
+        } else if b == 124u8 {
+            let is_or = (i + 1 < bytes.len() && bytes[i + 1] == 124u8)
+                || (i > 0 && bytes[i - 1] == 124u8);
+            if !is_or {
+                segs.push(cmd[start..i].trim());
+                start = i + 1;
+            }
+        }
+        i += 1;
+    }
+    segs.push(cmd[start..].trim());
+    segs
+}
+
+/// 该管道段是否为阻塞/分页类（会导致输出不实时）。
+/// 阻塞类：tail/head 必须读到 EOF 或足够行数；分页器独占终端。
+/// 流式过滤类（grep/awk/sed/cut/sort/uniq/wc…）实时，保留。
+fn is_blocking_filter(segment: &str) -> bool {
+    let first = segment.split_whitespace().next().unwrap_or("");
+    let base = first.rsplit(47u8 as char).next().unwrap_or(first);
+    matches!(
+        base,
+        "tail" | "head" | "less" | "more" | "pg" | "most" | "bat" | "ov" | "glow"
+    )
 }
 
 fn reads_whole_stdin(cmd: &str) -> bool {
@@ -537,6 +625,7 @@ impl Tool for UploadFile {
             let mut solver = self.solver.lock().await;
             let r = crate::api::file::upload(&self.http, &mut solver, path).await;
             drop(solver);
+            let mut aborted = false;
             match r {
                 Ok(info) => {
                     if let Ok(mut pend) = self.pending.lock() {
@@ -547,8 +636,23 @@ impl Tool for UploadFile {
                         info.file_name, info.id, info.is_image
                     ));
                 }
+                Err(AgentError::RateLimited { code, msg }) => {
+                    lines.push(format!(
+                        "[!] 触发风控/限流 (code={code}): {msg}；已中止本批上传，请稍后再试"
+                    ));
+                    aborted = true;
+                }
                 Err(e) => lines.push(format!("[!] 上传失败 {p}: {e}")),
             }
+            if aborted {
+                break;
+            }
+            // 批量上传间隔：模拟人工逐个选择文件的节奏（1~3s 随机）
+            let pause = {
+                use rand::Rng;
+                rand::rng().random_range(1000..=3000)
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
         }
         Ok(lines.join("\n"))
     }
@@ -584,5 +688,72 @@ impl ToolRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::strip_all_pipes;
+
+    fn strip(cmd: &str) -> String {
+        strip_all_pipes(cmd).0
+    }
+
+    #[test]
+    fn strips_tail_pipe() {
+        assert_eq!(strip("pip install x | tail -20"), "pip install x");
+    }
+
+    #[test]
+    fn keeps_grep_pipe() {
+        assert_eq!(strip("cat x | grep y"), "cat x | grep y");
+    }
+
+    #[test]
+    fn keeps_streaming_filters_removes_tail() {
+        assert_eq!(strip("cat a | grep b | tail -5"), "cat a | grep b");
+    }
+
+    #[test]
+    fn keeps_grep_and_awk() {
+        assert_eq!(strip("ps aux | grep node | awk \"{print $2}\""), "ps aux | grep node | awk \"{print $2}\"");
+    }
+
+    #[test]
+    fn strips_head_only() {
+        assert_eq!(strip("ls | head"), "ls");
+    }
+
+    #[test]
+    fn strips_pager() {
+        assert_eq!(strip("git log | less"), "git log");
+    }
+
+    #[test]
+    fn keeps_quoted_pipe() {
+        assert_eq!(strip("grep \"a|b\" file"), "grep \"a|b\" file");
+    }
+
+    #[test]
+    fn keeps_logical_or() {
+        assert_eq!(strip("a || b"), "a || b");
+    }
+
+    #[test]
+    fn keeps_redirection() {
+        assert_eq!(strip("make > /tmp/o.log 2>&1"), "make > /tmp/o.log 2>&1");
+    }
+
+    #[test]
+    fn no_pipe_unchanged() {
+        assert_eq!(strip("ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn strip_flag_true_when_blocking() {
+        assert!(strip_all_pipes("a | tail").1);
+        assert!(!strip_all_pipes("a | grep b").1);
+        assert!(!strip_all_pipes("a").1);
     }
 }

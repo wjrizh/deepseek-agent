@@ -85,6 +85,6 @@ Ok(ModelReply {
     }
 
     async fn message_count(&self, session_id: &str) -> Result<Option<i64>> {
-        crate::api::chat::latest_message_id(&self.http, session_id).await
+        crate::api::chat::message_count(&self.http, session_id).await
     }
 }

@@ -7,10 +7,20 @@ use wreq::Client;
 use wreq::header::{HeaderMap, HeaderName, HeaderValue};
 use wreq_util::Emulation;
 
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+/// 默认最小请求间隔。真人操作不会短于这个量级。
+pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_millis(1200);
+
 pub struct HttpClient {
     client: Client,
     base_url: String,
     tokens: TokenProvider,
+    /// 两次请求之间的最小间隔（全局门控）
+    min_interval: Duration,
+    /// 上次请求发起时刻
+    last_request: Mutex<Instant>,
 }
 
 impl HttpClient {
@@ -27,6 +37,8 @@ impl HttpClient {
             client,
             base_url: base_url.into(),
             tokens,
+            min_interval: DEFAULT_MIN_INTERVAL,
+            last_request: Mutex::new(Instant::now() - DEFAULT_MIN_INTERVAL),
         })
     }
 
@@ -40,6 +52,33 @@ impl HttpClient {
 
     pub fn tokens_mut(&mut self) -> &mut TokenProvider {
         &mut self.tokens
+    }
+
+    /// 全局请求节流：保证距上次请求至少 min_interval，并附加随机抖动。
+    /// 所有对外请求（含文件上传）都应先调用本方法。
+    pub async fn throttle(&self) {
+        let jitter = {
+            use rand::Rng;
+            let extra = self.min_interval.as_millis() as u64 / 2;
+            if extra > 0 {
+                Duration::from_millis(rand::rng().random_range(0..=extra))
+            } else {
+                Duration::ZERO
+            }
+        };
+        let target = self.min_interval + jitter;
+        let mut last = self.last_request.lock().await;
+        let elapsed = last.elapsed();
+        if elapsed < target {
+            tokio::time::sleep(target - elapsed).await;
+        }
+        *last = Instant::now();
+    }
+
+    /// 节流 + 构造请求头。发请求前用这个替代 headers()。
+    pub async fn prepare(&self) -> Result<HeaderMap> {
+        self.throttle().await;
+        self.headers()
     }
 
     /// 构造默认请求头（含鉴权）
