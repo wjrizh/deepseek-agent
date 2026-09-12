@@ -145,6 +145,30 @@ fn locate_chromium() -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// 是否以无头模式运行：环境变量优先，否则有显示环境时用有头（可见）模式。
+fn browser_headless() -> bool {
+    match std::env::var("LIGONG_BROWSER_HEADLESS").ok().as_deref() {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => {
+            std::env::var("DISPLAY").is_err()
+                && std::env::var("WAYLAND_DISPLAY").is_err()
+        }
+    }
+}
+
+/// 持久化 profile 目录；设置 LIGONG_BROWSER_EPHEMERAL=1 则改用内存隔离（不持久化）。
+fn browser_profile() -> Option<PathBuf> {
+    if matches!(std::env::var("LIGONG_BROWSER_EPHEMERAL").ok().as_deref(), Some("1") | Some("true")) {
+        return None;
+    }
+    if let Ok(p) = std::env::var("LIGONG_BROWSER_PROFILE") {
+        return Some(PathBuf::from(p));
+    }
+    let dir = dirs::home_dir()?.join(".ligong-mcp/profile");
+    Some(dir)
+}
+
 /// 启动 MCP 子进程并完成 initialize 握手，返回客户端句柄。
 async fn spawn_client() -> Result<Arc<McpClient>> {
     let cli = locate_mcp_cli().ok_or_else(|| {
@@ -155,14 +179,19 @@ async fn spawn_client() -> Result<Arc<McpClient>> {
 
     let mut cmd = Command::new("node");
     cmd.arg(&cli)
-        .arg("--headless")
-        .arg("--isolated")
         .arg("--no-sandbox")
         .arg("--image-responses")
         .arg("omit")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if browser_headless() {
+        cmd.arg("--headless");
+    }
+    match browser_profile() {
+        Some(profile) => { cmd.arg("--user-data-dir").arg(profile); }
+        None => { cmd.arg("--isolated"); }
+    }
     if let Some(chrome) = locate_chromium() {
         cmd.arg("--executable-path").arg(chrome);
     }

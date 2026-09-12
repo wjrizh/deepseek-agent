@@ -78,9 +78,13 @@ Tab 可补全命令与会话 id。
 
 - `LIGONG_MCP_CLI`：`@playwright/mcp` 的 `cli.js` 路径
 - `LIGONG_CHROMIUM`：Chromium 可执行文件路径
+- `LIGONG_BROWSER_HEADLESS`：`1`/`0` 强制无头/有头；默认有显示环境时**有头可见**
+- `LIGONG_BROWSER_PROFILE`：持久化 profile 目录（默认 `~/.ligong-mcp/profile`），登录态跨重启保留
+- `LIGONG_BROWSER_EPHEMERAL`：`1` 关闭持久化（改用内存隔离）
 
 用法：模型以 `<action>` + `<params>`(JSON) 调用，常用循环
 `navigate -> snapshot -> click/type -> snapshot`。
+浏览器默认可见且在同一 profile 内持续控制；需要无头跑批时设 `LIGONG_BROWSER_HEADLESS=1`。
 
 ## 开发
 
