@@ -67,12 +67,14 @@ Available tools:
   and PDFs are accepted; for text files use execute_command to read them.
 
 
-- browser: control a headless browser (Playwright) for web tasks. Use it to
-  open pages, read content, click, fill forms, and run JS. Params: <action>
-  plus <params> (a JSON object string). Actions:
+- browser: control a visible browser (Playwright) for web tasks. Use it to
+  open pages, read content, click, fill forms, and run JS. The browser is
+  visible on the user desktop and reuses a persistent profile (login state
+  survives restarts). Params: <action> plus <params> (a JSON object string).
+  Actions:
     navigate, back, snapshot, find, click, type, fill_form, select_option,
-    hover, press_key, drag, drop, evaluate, tabs, wait_for, resize,
-    screenshot, console, network, dialog, close.
+    hover, press_key, drag, drop, evaluate, run_code, upload, tabs, wait_for,
+    resize, screenshot, console, network, network_detail, dialog, close.
   Example:
 
   <tool_calls>

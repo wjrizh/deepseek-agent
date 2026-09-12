@@ -66,7 +66,7 @@ Tab 可补全命令与会话 id。
 ## 浏览器工具
 
 `browser` 工具通过 Microsoft 官方 [@playwright/mcp](https://github.com/microsoft/playwright-mcp)
-驱动无头浏览器，基于页面无障碍树快照（纯文本，适合无视觉模型）。
+驱动可见浏览器，基于页面无障碍树快照（纯文本，适合无视觉模型）。
 
 安装（包装到 `~/.ligong-mcp`，不侵入本仓库）：
 
@@ -81,6 +81,7 @@ Tab 可补全命令与会话 id。
 - `LIGONG_BROWSER_HEADLESS`：`1`/`0` 强制无头/有头；默认有显示环境时**有头可见**
 - `LIGONG_BROWSER_PROFILE`：持久化 profile 目录（默认 `~/.ligong-mcp/profile`），登录态跨重启保留
 - `LIGONG_BROWSER_EPHEMERAL`：`1` 关闭持久化（改用内存隔离）
+- `LIGONG_BROWSER_OUTPUT_DIR`：MCP 输出目录（默认 `$TMPDIR/ligong-browser-mcp`，避免污染当前目录）
 
 用法：模型以 `<action>` + `<params>`(JSON) 调用，常用循环
 `navigate -> snapshot -> click/type -> snapshot`。

@@ -33,6 +33,8 @@ fn browser_navigate_snapshot_evaluate() {
         eprintln!("跳过：未安装 @playwright/mcp");
         return;
     }
+    // 测试用一次性内存 profile，避免与正在运行的 agent 抢占同一 user-data-dir。
+    unsafe { std::env::set_var("LIGONG_BROWSER_EPHEMERAL", "1") };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let tool = Browser::new();
 

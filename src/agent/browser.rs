@@ -181,6 +181,16 @@ fn browser_profile() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// MCP 输出目录：默认写到系统临时目录，避免污染当前工作目录。
+fn browser_output_dir() -> Option<PathBuf> {
+    let dir = match std::env::var("LIGONG_BROWSER_OUTPUT_DIR") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => std::env::temp_dir().join("ligong-browser-mcp"),
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// 启动 MCP 子进程并完成 initialize 握手，返回客户端句柄。
 async fn spawn_client() -> Result<Arc<McpClient>> {
     let cli = locate_mcp_cli().ok_or_else(|| {
@@ -206,6 +216,9 @@ async fn spawn_client() -> Result<Arc<McpClient>> {
     }
     if let Some(chrome) = locate_chromium() {
         cmd.arg("--executable-path").arg(chrome);
+    }
+    if let Some(dir) = browser_output_dir() {
+        cmd.arg("--output-dir").arg(dir);
     }
 
     let mut child = cmd
@@ -346,7 +359,7 @@ impl Tool for Browser {
     }
 
     fn description(&self) -> &str {
-        "控制无头浏览器（Playwright）：导航、读取页面无障碍快照、点击、输入、填表、执行 JS 等。参数 action + params(JSON)。"
+        "控制可见浏览器（Playwright）：导航、读取页面无障碍快照、点击、输入、填表、执行 JS 等。参数 action + params(JSON)。"
     }
 
     async fn call(
@@ -364,8 +377,9 @@ impl Tool for Browser {
             None => return Ok(format!("[错误] 未知 action: {action}\n\n{}", actions_help())),
         };
         let args: Value = match params.get("params").map(|s| s.trim()) {
-            Some(s) if !s.is_empty() => match serde_json::from_str(s) {
-                Ok(v) => v,
+            Some(s) if !s.is_empty() => match serde_json::from_str::<Value>(s) {
+                Ok(v) if v.is_object() => v,
+                Ok(v) => return Ok(format!("[错误] params 必须是 JSON 对象，收到: {v}")),
                 Err(e) => return Ok(format!("[错误] params 不是合法 JSON: {e}\n原文: {s}")),
             },
             _ => json!({}),
