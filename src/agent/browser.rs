@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24,10 +24,22 @@ struct McpClient {
     stdin: tokio::sync::Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next_id: AtomicU64,
-    _child: Mutex<Option<Child>>,
+    child: Mutex<Option<Child>>,
+    dead: AtomicBool,
 }
 
 impl McpClient {
+    fn is_alive(&self) -> bool {
+        if self.dead.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut guard = self.child.lock().unwrap();
+        match guard.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -37,10 +49,10 @@ impl McpClient {
         line.push_str("\n");
         {
             let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|e| AgentError::Other(format!("mcp 写入失败: {e}")))?;
+            if let Err(e) = stdin.write_all(line.as_bytes()).await {
+                self.dead.store(true, Ordering::Relaxed);
+                return Err(AgentError::Other(format!("mcp 写入失败: {e}")));
+            }
             stdin.flush().await.ok();
         }
         match tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
@@ -60,10 +72,10 @@ impl McpClient {
         let mut line = serde_json::to_string(&msg)?;
         line.push_str("\n");
         let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| AgentError::Other(format!("mcp 写入失败: {e}")))?;
+        if let Err(e) = stdin.write_all(line.as_bytes()).await {
+            self.dead.store(true, Ordering::Relaxed);
+            return Err(AgentError::Other(format!("mcp 写入失败: {e}")));
+        }
         stdin.flush().await.ok();
         Ok(())
     }
@@ -212,7 +224,8 @@ async fn spawn_client() -> Result<Arc<McpClient>> {
         stdin: tokio::sync::Mutex::new(stdin),
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
-        _child: Mutex::new(Some(child)),
+        child: Mutex::new(Some(child)),
+        dead: AtomicBool::new(false),
     });
 
     let reader_client = client.clone();
@@ -232,6 +245,8 @@ async fn spawn_client() -> Result<Arc<McpClient>> {
                 let _ = tx.send(msg);
             }
         }
+        reader_client.dead.store(true, Ordering::Relaxed);
+        reader_client.pending.lock().unwrap().clear();
     });
 
     client
@@ -248,15 +263,17 @@ async fn spawn_client() -> Result<Arc<McpClient>> {
     Ok(client)
 }
 
-use tokio::sync::OnceCell;
-
-static CLIENT: OnceCell<Arc<McpClient>> = OnceCell::const_new();
+static CLIENT: Mutex<Option<Arc<McpClient>>> = Mutex::new(None);
 
 async fn client() -> Result<Arc<McpClient>> {
-    CLIENT
-        .get_or_try_init(|| async { spawn_client().await })
-        .await
-        .cloned()
+    if let Some(existing) = CLIENT.lock().unwrap().clone()
+        && existing.is_alive()
+    {
+        return Ok(existing);
+    }
+    let fresh = spawn_client().await?;
+    *CLIENT.lock().unwrap() = Some(fresh.clone());
+    Ok(fresh)
 }
 
 /// 支持的浏览器动作（action → 底层 MCP 工具）。
