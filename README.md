@@ -7,6 +7,7 @@ PoW（工作量证明）算法直接调用官方 API，支持：
 - 会话持久化 + 多会话切换（`/sessions` `/switch` `/new`）
 - 文件上传 + 基于文件问答
 - 本地命令执行（PTY 交互，`execute_command` 工具）
+- 浏览器控制（Playwright MCP，`browser` 工具：导航/快照/点击/填表/执行 JS）
 - token 自动管理（三级优先级 + 静默刷新）
 
 ## 安装
@@ -61,6 +62,25 @@ Tab 可补全命令与会话 id。
 1. `export DS_TOKEN=<你的 userToken>`
 2. 安装 Playwright 并登录 https://chat.deepseek.com，脚本会自动提取并缓存到
    `~/.deepseek-agent/token.json`
+
+## 浏览器工具
+
+`browser` 工具通过 Microsoft 官方 [@playwright/mcp](https://github.com/microsoft/playwright-mcp)
+驱动无头浏览器，基于页面无障碍树快照（纯文本，适合无视觉模型）。
+
+安装（包装到 `~/.ligong-mcp`，不侵入本仓库）：
+
+```bash
+./scripts/setup_browser_mcp.sh
+```
+
+环境变量（可选覆盖）：
+
+- `LIGONG_MCP_CLI`：`@playwright/mcp` 的 `cli.js` 路径
+- `LIGONG_CHROMIUM`：Chromium 可执行文件路径
+
+用法：模型以 `<action>` + `<params>`(JSON) 调用，常用循环
+`navigate -> snapshot -> click/type -> snapshot`。
 
 ## 开发
 
