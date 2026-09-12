@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod core;
 pub mod memory;
 pub mod model;

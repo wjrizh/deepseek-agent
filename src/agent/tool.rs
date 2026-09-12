@@ -545,6 +545,11 @@ fn truncate(s: String, max: usize) -> String {
     t
 }
 
+
+/// 按 MAX_TOOL_OUTPUT 截断工具输出（供外部工具模块复用）。
+pub fn truncate_output(s: String) -> String {
+    truncate(s, MAX_TOOL_OUTPUT)
+}
 /// 内置工具：上传需视觉读取的文件（图片/PDF），返回 file_id 并注入下一轮请求。
 pub struct UploadFile {
     http: Arc<crate::client::http::HttpClient>,

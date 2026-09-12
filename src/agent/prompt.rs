@@ -66,6 +66,26 @@ Available tools:
   paths: one or more file paths, separated by newline or comma. Only images
   and PDFs are accepted; for text files use execute_command to read them.
 
+
+- browser: control a headless browser (Playwright) for web tasks. Use it to
+  open pages, read content, click, fill forms, and run JS. Params: <action>
+  plus <params> (a JSON object string). Actions:
+    navigate, back, snapshot, find, click, type, fill_form, select_option,
+    hover, press_key, drag, drop, evaluate, tabs, wait_for, resize,
+    screenshot, console, network, dialog, close.
+  Example:
+
+  <tool_calls>
+  <invoke name="browser">
+  <parameter name="action">navigate</parameter>
+  <parameter name="params">{"url":"https://example.com"}</parameter>
+  </invoke>
+  </tool_calls>
+
+  Typical loop: navigate -> snapshot (accessibility tree with [ref=eN]
+  targets) -> click/type using those refs -> snapshot again. ALWAYS snapshot
+  before acting to get fresh element refs; do not guess selectors.
+
 Rules:
 - Nothing before or after the block. No markdown fences, no explanations.
 - Use the tag names EXACTLY as shown. No prefixes, suffixes, or extra

@@ -10,3 +10,6 @@ docs/
 
 *.bak
 *.bak_*
+
+# Playwright MCP 运行时快照
+.playwright-mcp/

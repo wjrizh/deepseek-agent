@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 /// 已知工具名（唯一真源；新增工具需在此登记 + 实现 `Tool`）。
-pub const KNOWN_TOOLS: &[&str] = &["execute_command", "upload_file"];
+pub const KNOWN_TOOLS: &[&str] = &["execute_command", "upload_file", "browser"];
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -611,6 +611,13 @@ fn validate(name: &str, params: &HashMap<String, String>) -> std::result::Result
             let paths = params.get("paths").map(|s| s.trim()).unwrap_or("");
             if paths.is_empty() {
                 return Err("缺少非空的 <paths> 参数".into());
+            }
+            Ok(())
+        }
+        "browser" => {
+            let action = params.get("action").map(|s| s.trim()).unwrap_or("");
+            if action.is_empty() {
+                return Err("缺少非空的 <action> 参数".into());
             }
             Ok(())
         }

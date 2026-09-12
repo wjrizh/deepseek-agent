@@ -74,6 +74,7 @@ impl Agent {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ExecuteCommand::new(cwd)));
+        tools.register(Box::new(crate::agent::browser::Browser::new()));
         Self {
             model,
             memory: Box::new(InMemory::new()),
